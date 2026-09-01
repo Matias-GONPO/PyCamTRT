@@ -1,0 +1,20 @@
+# Build trees (created inside the tensorrt-dev container)
+build/
+__pycache__/
+*.pyc
+
+# TensorRT engines are per-GPU, per-TRT-version artifacts - built locally
+# from the committed .onnx exports (see README "Models"). Never committed.
+*.engine
+
+# NVIDIA Video Codec SDK: its license forbids redistribution. Download it
+# yourself into third_party/Video_Codec_SDK/ (see third_party/ README).
+third_party/Video_Codec_SDK/
+
+# Stream-farm runtime artifacts + binaries + media (record your own clips;
+# see tools/stream_farm/farm.sh header)
+tools/stream_farm/bin/
+tools/stream_farm/media/
+tools/stream_farm/run/
+tools/stream_farm/*.crt
+tools/stream_farm/*.key

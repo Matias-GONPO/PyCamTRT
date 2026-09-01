@@ -1,0 +1,1 @@
+Download the NVIDIA Video Codec SDK (13.x) from developer.nvidia.com and unpack it here as Video_Codec_SDK/ — its license forbids redistribution, so it is gitignored. The CMake build gates the RTSP targets on its presence.
