@@ -22,9 +22,13 @@ struct Detection {
 // pipeline.cpp's ChildPlan/Validate()). Aligned with FrameResult::detections
 // the same way the pre-M4b single-child texts/labels/label_scores fields
 // were: element i describes detections[i]'s crop through THIS child.
-// Exactly one of {texts} / {labels, label_scores} is populated, matching
-// this child's family (Ctc -> texts, Argmax -> labels+label_scores) - the
-// other stays empty.
+// Exactly one of {texts} / {labels, label_scores} / {vectors} is
+// populated, matching this child's family (Ctc -> texts, Argmax ->
+// labels+label_scores, Embedding -> vectors) - the others stay empty.
+// R1 routing note: under a Select filter the ALIGNMENT DOES NOT CHANGE -
+// element i still describes detections[i]; a detection routed away from
+// this child simply keeps that child's empty/default entry ("" / label 0
+// with score 0 / empty vector). One indexing rule, routed or not.
 struct ChildOutput {
     int layer = -1;  // index into the compiled graph's layers (0 = the
                      // detector root; siblings are 1..K in declaration
@@ -32,6 +36,35 @@ struct ChildOutput {
     std::vector<std::string> texts;
     std::vector<int> labels;
     std::vector<float> label_scores;
+    // T3.1 embedding family (report 11): vectors[i] is detections[i]'s
+    // crop's RAW child-engine output row ([D] floats, e.g. a 512-d re-ID
+    // feature) - no decode kernel exists for this family by design, the
+    // "decode" IS the pass-through. Populated only for a
+    // Family::Embedding child (the other fields stay empty, same
+    // exactly-one-populated contract as texts/labels above). Size note:
+    // ~D*4 bytes per detection (2 KB at D=512) - tens of detections keeps
+    // this inside the compact-results contract.
+    std::vector<std::vector<float>> vectors;
+    // CP1: this child's own GPU-stream time for the batch this result rode
+    // in - cudaEventElapsedTime(ev_start, ev_done) on the child's stream
+    // (see pipeline.cpp's ChildScratch), same value on every result of that
+    // batch (mirrors FrameResult::ms_take_to_done's whole-batch semantics,
+    // just per-child instead of per-batch). RAW meaning, read carefully:
+    // enqueue-to-done on WHATEVER stream this child actually ran on. Under
+    // the default (PipelineConfig::cascade_serial == false), that is the
+    // child's OWN dedicated stream, so this is a genuinely isolated
+    // per-child GPU time (can overlap with siblings - the whole point).
+    // Under cascade_serial == true, every child (and the detector's own
+    // pass, and SAHI when on) shares ONE stream, so "the child's stream" IS
+    // that shared main gpu_stream, carrying every sibling's traffic in
+    // strict FIFO order rather than this child's own dedicated queue - the
+    // measured window still brackets only this child's own enqueued work,
+    // but on a stream whose scheduling is now entangled with everyone
+    // else's, rather than isolated. That asymmetry between the two modes is
+    // deliberate, not a bug to normalize away - it IS the A/B measurement
+    // (see qa_matrix.py section J: compare this field's mean, per child,
+    // cascade_serial=True vs. False, on the same content).
+    double ms_gpu = 0;
 };
 
 struct FrameResult {

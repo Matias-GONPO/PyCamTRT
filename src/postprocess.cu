@@ -233,6 +233,7 @@ __global__ void ArgmaxKernel(const float* __restrict__ logits, int batch,
 __global__ void YoloE2EBatchedKernel(
     const float* __restrict__ raw, int max_dets,
     const PostprocImageParams* __restrict__ params, float thresh,
+    bool norm_cxcywh, float net_w, float net_h,
     GpuDetection* __restrict__ out, int* counts) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= max_dets) return;
@@ -242,14 +243,43 @@ __global__ void YoloE2EBatchedKernel(
     const float score = row[4];
     if (score < thresh) return;
 
+    // rtdetr variant (report 11 T3.2): same [dets,6] row contract, but the
+    // box columns are NORMALIZED (0-1) cx,cy,w,h (ultralytics RT-DETR
+    // export - pixel scaling lives in ITS python postprocess, so it must
+    // live here for us) - scale to letterbox pixels and convert to the
+    // corner form the shared affine below expects. yolo-e2e rows
+    // (norm_cxcywh=false) pass through untouched - same values, same ops,
+    // bit-exact with the pre-variant kernel.
+    float bx0 = row[0], by0 = row[1], bx1 = row[2], by1 = row[3];
+    if (norm_cxcywh) {
+        // Intrinsics, not plain ops: `cx - 0.5f*bw` is a mul-add shape
+        // nvcc contracts into fma (the existing kernels' `(a - b) / c`
+        // shapes never were - why this file needed no care before), and a
+        // contracted fma differs from the CPU reference's separate
+        // round-per-op in the last ulp (caught by this family's own
+        // checkpoint on the non-square-geometry image). __fmul_rn/
+        // __fadd_rn/__fsub_rn are guaranteed never fused - pinning the
+        // exact op sequence CpuRtDetr (postprocess_batch_test.cpp) mirrors.
+        const float cx = __fmul_rn(row[0], net_w);
+        const float cy = __fmul_rn(row[1], net_h);
+        const float bw = __fmul_rn(row[2], net_w);
+        const float bh = __fmul_rn(row[3], net_h);
+        const float hw = __fmul_rn(0.5f, bw);
+        const float hh = __fmul_rn(0.5f, bh);
+        bx0 = __fsub_rn(cx, hw);
+        by0 = __fsub_rn(cy, hh);
+        bx1 = __fadd_rn(cx, hw);
+        by1 = __fadd_rn(cy, hh);
+    }
+
     // Un-letterbox: DecodeAnchor's `(coord - pad) / scale` affine, applied
     // directly to both corners - row is already x1,y1,x2,y2 in letterbox
     // space, unlike DecodeAnchor's cx,cy,w,h input (see postprocess.h's
     // WHY-comment for the full derivation).
-    float x0 = (row[0] - p.lb.pad_x) / p.lb.scale;
-    float y0 = (row[1] - p.lb.pad_y) / p.lb.scale;
-    float x1 = (row[2] - p.lb.pad_x) / p.lb.scale;
-    float y1 = (row[3] - p.lb.pad_y) / p.lb.scale;
+    float x0 = (bx0 - p.lb.pad_x) / p.lb.scale;
+    float y0 = (by0 - p.lb.pad_y) / p.lb.scale;
+    float x1 = (bx1 - p.lb.pad_x) / p.lb.scale;
+    float y1 = (by1 - p.lb.pad_y) / p.lb.scale;
     x0 = fmaxf(x0, 0.f);
     y0 = fmaxf(y0, 0.f);
     x1 = fminf(x1, (float)p.src_w);
@@ -321,12 +351,14 @@ void LaunchArgmaxBatched(const float* d_logits, int batch, int classes,
 
 void LaunchYoloE2EBatched(const float* d_raw, int batch, int max_dets,
                           const PostprocImageParams* d_params,
-                          float score_thresh, GpuDetection* d_out,
-                          int* d_counts, cudaStream_t stream) {
+                          float score_thresh, bool norm_cxcywh, float net_w,
+                          float net_h, GpuDetection* d_out, int* d_counts,
+                          cudaStream_t stream) {
     if (batch <= 0) return;
     cudaMemsetAsync(d_counts, 0, batch * sizeof(int), stream);
     const int block = 256;
     const dim3 grid((max_dets + block - 1) / block, batch);
     YoloE2EBatchedKernel<<<grid, block, 0, stream>>>(
-        d_raw, max_dets, d_params, score_thresh, d_out, d_counts);
+        d_raw, max_dets, d_params, score_thresh, norm_cxcywh, net_w, net_h,
+        d_out, d_counts);
 }

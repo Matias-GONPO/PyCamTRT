@@ -59,9 +59,11 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-// Net input side is fixed at 640x640 for the v1 executor (YoloDetect
-// family) - not yet part of the graph API; a future Family/step option
-// would generalize this.
+// Default net input side. Since the report-11 dims fix, the ACTUAL net
+// dims are per-pipeline Impl members (net_w/net_h), read from the layer-0
+// engine's own InputDims in Setup() - the same way cascade children have
+// always taken their input size from their engines. These constants only
+// seed the members before Setup() runs.
 constexpr int kNetW = 640, kNetH = 640;
 
 void CheckCu(CUresult r, const char* what) {
@@ -95,17 +97,28 @@ inline float3 ToFloat3(const float a[3]) {
 struct ChildPlan {
     std::string name;
     std::string engine_path;
-    Family family;  // Ctc or Argmax only - see Validate()'s check.
+    Family family;  // Ctc/Argmax/Embedding only - see Validate()'s check.
     // M1a/M3a per-position defaults still apply (see ResolveNormColor's
     // call site below): today's hardcoded LPRNet/cv2 convention
     // (-127.5, 1/128, BGR) unless this child's Engine step overrides it.
     float norm_offset[3];
     float norm_scale[3];
     int rgb;  // 0 = BGR, 1 = RGB (already resolved - not -1/inherit here)
+    // R1 routing (Select): resolved from this child's Select step, if any.
+    // filtered == false means "no Select anywhere on this child" and the
+    // executor takes the pre-R1 shared-crop path untouched for it.
+    bool filtered = false;
+    std::vector<int> sel_classes;  // empty = any class
+    float sel_min_score = 0.f;     // 0 = any
+    float sel_min_size = 0.f;      // 0 = any
+    // R3: auto-build prefs for this child's engine (used only when
+    // engine_path is a .onnx - see EngineBuilder.h).
+    enginebuilder::BuildPrefs build;
 };
 
 struct ExecPlan {
     std::string engine_path;
+    enginebuilder::BuildPrefs l0_build;  // R3 (.onnx engine_path only)
     // M4a: which Postprocess family layer 0's DETECTOR decodes to
     // (YoloDetect or YoloE2E - see Family in graph.h). Selects both
     // Setup()'s engine I/O shape check and GpuLoop's layer-0 decode path
@@ -129,6 +142,12 @@ struct ExecPlan {
     float sahi_merge_iou = 0.5f;
     bool sahi_full_frame = true;
     bool sahi_serial = false;
+    // CP1: mirrors PipelineConfig::cascade_serial (graph.h) - unlike
+    // sahi_serial above (per LAYER, since SAHI belongs to one specific
+    // detection layer), this is PIPELINE-wide (the cascade is every sibling
+    // child 1..K acting together, not tied to any one LayerDesc) - so it's
+    // read straight off cfg in Validate() below rather than off l0.
+    bool cascade_serial = false;
     // M4b: zero or more SIBLING recognition children (a depth-2 tree: one
     // detector root, N children that EACH crop the root's detections
     // independently - see ChildPlan above). Empty = detector-only
@@ -139,11 +158,12 @@ struct ExecPlan {
 };
 
 constexpr const char* kV1Supported =
-    "v1 executor supports Process->Engine->Postprocess(YoloDetect|YoloE2E) "
-    "[+SAHI, YoloDetect only] optionally feeding one or more SIBLING "
-    "Engine->Postprocess(Ctc|Argmax) children (a depth-2 tree: every child "
-    "crops the DETECTOR layer's own Postprocess step, never another "
-    "child's)";
+    "v1 executor supports Process->Engine->Postprocess(YoloDetect|YoloE2E|"
+    "RtDetr) [+SAHI, YoloDetect only] optionally feeding one or more "
+    "SIBLING [Select->]Engine->Postprocess(Ctc|Argmax|Embedding) children "
+    "(a depth-2 tree: every child crops the DETECTOR layer's own "
+    "Postprocess step - optionally through a Select routing filter fed "
+    "from that same step - never another child's output)";
 
 [[noreturn]] void FailGraph(const std::string& got) {
     throw std::runtime_error(std::string(kV1Supported) + "; got " + got);
@@ -272,11 +292,14 @@ ExecPlan Validate(const PipelineConfig& cfg) {
             FailGraph("layer 0 step 1 (want Engine fed from the Process step)");
         if (q.kind != StepKind::Postprocess || q.input != l0.steps[1])
             FailGraph("layer 0 step 2 (want Postprocess fed from the Engine step)");
-        if (q.family != Family::YoloDetect && q.family != Family::YoloE2E)
+        if (q.family != Family::YoloDetect && q.family != Family::YoloE2E &&
+            q.family != Family::RtDetr)
             FailGraph("Postprocess(Ctc|Argmax) at layer 0");
         engine_step_idx = l0.steps[1];
         post_step_idx = l0.steps[2];
         plan.engine_path = e.engine_path;
+        plan.l0_build = {e.build_max_batch, e.build_fp16, e.build_h,
+                         e.build_w};
         plan.l0_family = q.family;
         plan.score_thresh = q.score_thresh;
         plan.iou_thresh = q.iou_thresh;
@@ -292,11 +315,14 @@ ExecPlan Validate(const PipelineConfig& cfg) {
             FailGraph("layer 0 step 0 (want Engine, input -1 - Process implied)");
         if (q.kind != StepKind::Postprocess || q.input != l0.steps[0])
             FailGraph("layer 0 step 1 (want Postprocess fed from the Engine step)");
-        if (q.family != Family::YoloDetect && q.family != Family::YoloE2E)
+        if (q.family != Family::YoloDetect && q.family != Family::YoloE2E &&
+            q.family != Family::RtDetr)
             FailGraph("Postprocess(Ctc|Argmax) at layer 0");
         engine_step_idx = l0.steps[0];
         post_step_idx = l0.steps[1];
         plan.engine_path = e.engine_path;
+        plan.l0_build = {e.build_max_batch, e.build_fp16, e.build_h,
+                         e.build_w};
         plan.l0_family = q.family;
         plan.score_thresh = q.score_thresh;
         plan.iou_thresh = q.iou_thresh;
@@ -322,7 +348,8 @@ ExecPlan Validate(const PipelineConfig& cfg) {
     // scope violations (the layer-1-sahi check just above is the same
     // shape) rather than silently ignoring sahi= or producing tile-boundary
     // duplicate detections.
-    if (plan.sahi && plan.l0_family == Family::YoloE2E) {
+    if (plan.sahi && (plan.l0_family == Family::YoloE2E ||
+                      plan.l0_family == Family::RtDetr)) {
         throw std::runtime_error(
             "SAHI requires the yolo family; cross-tile merge NMS is not "
             "defined for e2e heads in v1");
@@ -340,7 +367,8 @@ ExecPlan Validate(const PipelineConfig& cfg) {
     for (size_t i = 0; i < cfg.steps.size(); i++) {
         const StepDesc& s = cfg.steps[i];
         if (s.kind == StepKind::Postprocess &&
-            (s.family == Family::Ctc || s.family == Family::Argmax)) {
+            (s.family == Family::Ctc || s.family == Family::Argmax ||
+             s.family == Family::Embedding)) {
             ctc_argmax_post_steps.push_back((int)i);
         }
     }
@@ -370,46 +398,104 @@ ExecPlan Validate(const PipelineConfig& cfg) {
                   "not a cascade child layer)";
             throw std::runtime_error(os.str());
         }
-        if (l.steps.size() != 2) {
+        // R1: a child layer is [Engine, Postprocess] (unrouted - the
+        // pre-R1 shape, unchanged) or [Select, Engine, Postprocess]
+        // (routed - see StepKind::Select's WHY-comment in graph.h).
+        if (l.steps.size() != 2 && l.steps.size() != 3) {
             std::ostringstream os;
             os << l.steps.size() << " steps at layer " << li;
             FailGraph(os.str());
         }
-        const StepDesc& e = StepAt(l.steps[0]);
-        const StepDesc& q = StepAt(l.steps[1]);
-        if (e.kind != StepKind::Engine || e.input != post_step_idx) {
-            // Distinguish "fed from some OTHER child's Postprocess" (a
-            // named, deliberate scope rejection - deep chains are a
-            // documented future generalization, not an oversight) from any
-            // other malformed wiring (the generic FailGraph below, same
-            // house style as every other shape check in this function).
+        const bool routed = l.steps.size() == 3;
+        // The named depth-3 rejection, shared by both the Engine and
+        // Select wiring checks below - deep chains are a documented
+        // future generalization, not an oversight.
+        auto fail_depth3 = []() -> void {
+            throw std::runtime_error(
+                "v1 executor supports a depth-2 tree: one detector "
+                "layer feeding sibling recognition layers; chained "
+                "cascades (a child of a child) are not yet executable");
+        };
+        int sel_step_idx = -1;  // this child's effective Select step
+        if (routed) {
+            const StepDesc& sel = StepAt(l.steps[0]);
+            if (sel.kind != StepKind::Select) {
+                std::ostringstream os;
+                os << "layer " << li << " step 0 (3-step child layer: want "
+                      "Select as step 0)";
+                FailGraph(os.str());
+            }
+            if (sel.input != post_step_idx) {
+                // A Select fed from another child's Postprocess is the
+                // same chained-cascade case as an Engine fed from one.
+                if (std::find(ctc_argmax_post_steps.begin(),
+                              ctc_argmax_post_steps.end(),
+                              sel.input) != ctc_argmax_post_steps.end()) {
+                    fail_depth3();
+                }
+                std::ostringstream os;
+                os << "layer " << li << " step 0 (want Select fed from "
+                      "layer 0's postprocess step)";
+                FailGraph(os.str());
+            }
+            sel_step_idx = l.steps[0];
+        }
+        const StepDesc& e = StepAt(l.steps[routed ? 1 : 0]);
+        const StepDesc& q = StepAt(l.steps[routed ? 2 : 1]);
+        const int engine_step = l.steps[routed ? 1 : 0];
+        bool engine_ok = e.kind == StepKind::Engine;
+        if (engine_ok) {
+            if (routed) {
+                // A routed layer's Engine must consume ITS OWN Select.
+                engine_ok = e.input == sel_step_idx;
+            } else if (e.input == post_step_idx) {
+                engine_ok = true;  // classic direct crop edge
+            } else if (e.input >= 0 &&
+                       (size_t)e.input < cfg.steps.size() &&
+                       cfg.steps[e.input].kind == StepKind::Select &&
+                       cfg.steps[e.input].input == post_step_idx) {
+                // Shared Select: a 2-step child may consume a Select
+                // declared in ANOTHER child layer (sharing is legal but
+                // never required - see the Select docstring).
+                sel_step_idx = e.input;
+            } else {
+                engine_ok = false;
+            }
+        }
+        if (!engine_ok) {
             const bool via_child =
                 e.kind == StepKind::Engine &&
                 std::find(ctc_argmax_post_steps.begin(),
                          ctc_argmax_post_steps.end(),
                          e.input) != ctc_argmax_post_steps.end();
-            if (via_child) {
-                throw std::runtime_error(
-                    "v1 executor supports a depth-2 tree: one detector "
-                    "layer feeding sibling recognition layers; chained "
-                    "cascades (a child of a child) are not yet executable");
-            }
+            if (via_child) fail_depth3();
             std::ostringstream os;
-            os << "layer " << li << " step 0 (want Engine fed from layer "
-                  "0's postprocess step)";
+            os << "layer " << li << " step " << (routed ? 1 : 0)
+               << " (want Engine fed from layer 0's postprocess step, this "
+                  "layer's Select, or a Select fed from that postprocess)";
             FailGraph(os.str());
         }
-        if (q.kind != StepKind::Postprocess || q.input != l.steps[0] ||
-            (q.family != Family::Ctc && q.family != Family::Argmax)) {
+        if (q.kind != StepKind::Postprocess || q.input != engine_step ||
+            (q.family != Family::Ctc && q.family != Family::Argmax &&
+             q.family != Family::Embedding)) {
             std::ostringstream os;
-            os << "layer " << li << " step 1 (want Postprocess(Ctc|Argmax) "
+            os << "layer " << li << " step " << (routed ? 2 : 1)
+               << " (want Postprocess(Ctc|Argmax|Embedding) "
                   "fed from the Engine step)";
             FailGraph(os.str());
         }
         ChildPlan cp;
         cp.name = l.name;
         cp.engine_path = e.engine_path;
+        cp.build = {e.build_max_batch, e.build_fp16, e.build_h, e.build_w};
         cp.family = q.family;
+        if (sel_step_idx >= 0) {
+            const StepDesc& sel = StepAt(sel_step_idx);
+            cp.filtered = true;
+            cp.sel_classes = sel.sel_classes;
+            cp.sel_min_score = sel.sel_min_score;
+            cp.sel_min_size = sel.sel_min_size;
+        }
         // WHY default: the cascade position is today's only crop-edge
         // target (fed by a cross-layer crop edge - see the Engine input
         // check above); LPRNet/OCR (Ctc) is the original concrete example,
@@ -422,7 +508,7 @@ ExecPlan Validate(const PipelineConfig& cfg) {
                          cp.norm_offset, cp.norm_scale, &rgb);
         cp.rgb = rgb ? 1 : 0;
         plan.children.push_back(cp);
-        child_post_indices.push_back(l.steps[1]);
+        child_post_indices.push_back(l.steps[routed ? 2 : 1]);
     }
 
     // ---- Sink validation (Phase A1: endpoint sinks) --------------------
@@ -496,6 +582,11 @@ ExecPlan Validate(const PipelineConfig& cfg) {
             }
         }
     }
+
+    // CP1: pipeline-wide (see ExecPlan::cascade_serial's WHY-comment above
+    // for why this reads off cfg directly rather than off any one LayerDesc,
+    // unlike sahi_serial's l0.sahi_serial a few lines up).
+    plan.cascade_serial = cfg.cascade_serial;
 
     return plan;
 }
@@ -1105,6 +1196,11 @@ struct Pipeline::Impl {
     ExecPlan plan;
     int n_streams = 0;
     size_t in_stride = 0;
+    // Report-11 dims fix: the layer-0 net input dims, read from the
+    // engine in Setup() (see kNetW's comment). Every preprocess/
+    // letterbox/SAHI-resize below uses THESE, never the constants.
+    int net_w = kNetW;
+    int net_h = kNetH;
 
     CUcontext ctx = nullptr;
     CUdevice dev = 0;  // valid iff ctx != nullptr - Teardown() needs it for
@@ -1184,6 +1280,23 @@ struct Pipeline::Impl {
         float* d_argmax_scores = nullptr;
         std::vector<int> h_argmax_labels;
         std::vector<float> h_argmax_scores;
+        // CP1: this child's OWN CUDA stream (default/parallel path - see
+        // PipelineConfig::cascade_serial) - concurrent enqueueV3() across
+        // distinct TrtEngine execution contexts is legal, so every child
+        // gets its entire crop/infer/D2H pipeline enqueued here with no
+        // synchronization against siblings (see GpuLoop's cascade block).
+        // Unused for actual kernel launches under cascade_serial == true
+        // (everything funnels through the shared gpu_stream there instead -
+        // see result.h's ChildOutput::ms_gpu WHY-comment for what that
+        // means for the events below), but still created/destroyed
+        // unconditionally so the two modes are symmetric to set up/tear
+        // down and an A/B toggle needs no Setup()/Teardown() branching.
+        // ev_start/ev_done bracket this child's own GPU work for ONE
+        // batch (cudaEventElapsedTime -> ChildOutput::ms_gpu) - timing
+        // enabled (plain cudaEventCreate, not cudaEventCreateWithFlags(...,
+        // cudaEventDisableTiming)) since that's the whole point of them.
+        cudaStream_t stream = nullptr;
+        cudaEvent_t ev_start = nullptr, ev_done = nullptr;
     };
     std::vector<ChildScratch> children;  // index-parallel to plan.children
     // Crop-RECT scratch (source-frame coordinates only - see CropParams):
@@ -1363,7 +1476,7 @@ void Pipeline::Impl::Setup() {
     // file already does via its own cuCtxSetCurrent(ctx) call.
     CheckCu(cuCtxSetCurrent(ctx), "cuCtxSetCurrent (Setup)");
 
-    engine.reset(new TrtEngine(plan.engine_path));
+    engine.reset(new TrtEngine(plan.engine_path, plan.l0_build));
     Logf("\xe2\x9c\x93 Engine loaded: %s (max batch %d)", plan.engine_path.c_str(),
          engine->MaxBatch());
     if (n_streams > engine->MaxBatch()) {
@@ -1383,7 +1496,8 @@ void Pipeline::Impl::Setup() {
     // vs. yolo's transposed [N,4+classes,anchors] (channel-major); see
     // postprocess.h's LaunchYoloE2EBatched WHY-comment for the verified
     // layout + evidence.
-    if (plan.l0_family == Family::YoloE2E) {
+    if (plan.l0_family == Family::YoloE2E ||
+        plan.l0_family == Family::RtDetr) {
         if (od.nbDims != 3 || od.d[2] != 6) {
             throw std::runtime_error(
                 "yolo-e2e engine: want 3D output [N,dets,6] "
@@ -1414,6 +1528,32 @@ void Pipeline::Impl::Setup() {
         classes = od.d[1] - 4;
         anchors = od.d[2];
         Logf("\xe2\x9c\x93 Head: %d classes, %d anchors", classes, anchors);
+    }
+    // Report-11 dims fix (T3.3, two stages): the fail-fast that first
+    // closed the silent-wrong-inference + GPU-OOB hole (preprocess wrote
+    // fixed 640x640 tensors into engine-sized buffers) is now the REAL
+    // fix - the net dims are read from the layer-0 engine itself, the same
+    // way cascade children have always taken theirs (see the ChildScratch
+    // block below). Structural contract stays fail-fast and named: 4D
+    // [N,3,H,W]. Every preprocess/letterbox/SAHI-resize site uses
+    // net_w/net_h from here on, so any 4D 3-channel export (640, 416,
+    // 1280, non-square) is now first-class.
+    const nvinfer1::Dims& l0_id = engine->InputDims();
+    if (l0_id.nbDims != 4 || l0_id.d[1] != 3 || l0_id.d[2] < 32 ||
+        l0_id.d[3] < 32) {
+        std::string got = "[";
+        for (int i = 1; i < l0_id.nbDims; i++)
+            got += (i > 1 ? "," : "") + std::to_string(l0_id.d[i]);
+        got += "]";
+        throw std::runtime_error(
+            "layer-0 (detector) engine input is " + got +
+            " - want 4D [N,3,H,W] (3-channel, H/W >= 32)");
+    }
+    net_h = l0_id.d[2];
+    net_w = l0_id.d[3];
+    if (net_w != kNetW || net_h != kNetH) {
+        Logf("\xe2\x9c\x93 Layer-0 net dims from engine: %dx%d (non-default)",
+             net_w, net_h);
     }
     in_stride = engine->InputCount();
     mb = engine->MaxBatch();
@@ -1448,7 +1588,7 @@ void Pipeline::Impl::Setup() {
     children.clear();
     for (const ChildPlan& cp : plan.children) {
         ChildScratch cs;
-        cs.engine.reset(new TrtEngine(cp.engine_path));
+        cs.engine.reset(new TrtEngine(cp.engine_path, cp.build));
         const nvinfer1::Dims& id = cs.engine->InputDims();
         const nvinfer1::Dims& ood = cs.engine->OutputDims();
         if (id.nbDims != 4) {
@@ -1489,6 +1629,36 @@ void Pipeline::Impl::Setup() {
             cudaMalloc(&cs.d_argmax_scores, cs.engine->MaxBatch() * sizeof(float));
             cs.h_argmax_labels.resize(cs.engine->MaxBatch());
             cs.h_argmax_scores.resize(cs.engine->MaxBatch());
+        } else if (cp.family == Family::Embedding) {
+            // T3.1 embedding family (report 11): a penultimate-feature /
+            // re-ID head - 2D [N,D] (trailing singleton dims squeezable,
+            // same exporter quirk tolerance as argmax above). There is NO
+            // decode kernel by design: the raw row IS the result, D2H'd
+            // through the same h_logits path the ctc branch already uses
+            // (sized generically from OutputCount() below), then handed
+            // out per detection as ChildOutput::vectors. No
+            // family-specific device scratch to allocate.
+            if (ood.nbDims < 2) {
+                throw std::runtime_error(
+                    "cascade child '" + cp.name + "' (embedding) engine: "
+                    "want 2D output [N,D] (or [N,D,1,1] with trailing "
+                    "dims == 1)");
+            }
+            for (int i = 2; i < ood.nbDims; i++) {
+                if (ood.d[i] != 1) {
+                    throw std::runtime_error(
+                        "cascade child '" + cp.name + "' (embedding) "
+                        "engine: want 2D output [N,D] - trailing dim " +
+                        std::to_string(i) + " is " +
+                        std::to_string(ood.d[i]) + ", want 1 (squeezable)");
+                }
+            }
+            cs.classes = ood.d[1];  // = D; steps=1 keeps h_logits sizing
+            cs.steps = 1;           // generic (per-item OutputCount()).
+            Logf("\xe2\x9c\x93 Embedding child '%s': %s (max batch %d, in "
+                 "%dx%d, D=%d raw pass-through)",
+                 cp.name.c_str(), cp.engine_path.c_str(),
+                 cs.engine->MaxBatch(), cs.w, cs.h, cs.classes);
         } else {
             if (ood.nbDims != 3) {
                 throw std::runtime_error(
@@ -1504,6 +1674,13 @@ void Pipeline::Impl::Setup() {
         }
         cudaMalloc(&cs.d_crops, cs.engine->MaxBatch() * sizeof(CropParams));
         cs.h_logits.resize((size_t)cs.engine->MaxBatch() * cs.engine->OutputCount());
+        // CP1: per-child stream + timing events (see ChildScratch's
+        // WHY-comment) - created here, AFTER cuCtxSetCurrent(ctx) above, so
+        // they're bound to the same (retained primary) context every other
+        // per-child/per-pipeline CUDA object in this function is.
+        cudaStreamCreate(&cs.stream);
+        cudaEventCreate(&cs.ev_start);
+        cudaEventCreate(&cs.ev_done);
         children.push_back(std::move(cs));
     }
     // M4b back-compat (see result.h's WHY-comment): resolve the FIRST
@@ -1635,6 +1812,17 @@ void Pipeline::Impl::Teardown() {
         cudaFree(cs.d_crops);
         cudaFree(cs.d_argmax_labels);
         cudaFree(cs.d_argmax_scores);
+        // CP1: per-child stream/events (see ChildScratch's WHY-comment) -
+        // torn down here, same teardown-ordering discipline as everything
+        // else in this loop: BEFORE cs.engine.reset() (the execution
+        // context/engine that queued work on cs.stream must still exist
+        // while any outstanding stream state is reclaimed) and, like every
+        // other CUDA object in this function, BEFORE the primary-context
+        // release at the bottom of Teardown() (cuCtxSetCurrent(ctx) already
+        // ran above, so these destroy calls target the right context).
+        if (cs.stream) cudaStreamDestroy(cs.stream);
+        if (cs.ev_start) cudaEventDestroy(cs.ev_start);
+        if (cs.ev_done) cudaEventDestroy(cs.ev_done);
         cs.engine.reset();
     }
     children.clear();
@@ -1852,8 +2040,8 @@ void Pipeline::Impl::ProducerLoop(int id) {
                     // hardcoded YOLO behavior.
                     const LetterboxInfo lb = LaunchNV12ToTensor(
                         frame.device_ptr, frame.pitch, frame.width,
-                        frame.height, b->base + slot * in_stride, kNetW,
-                        kNetH, stream, ToFloat3(plan.l0_norm_offset),
+                        frame.height, b->base + slot * in_stride, net_w,
+                        net_h, stream, ToFloat3(plan.l0_norm_offset),
                         ToFloat3(plan.l0_norm_scale), plan.l0_rgb);
                     // Full-res copy for stage-2 crops, on the same stream:
                     // the event below then covers kernel + copy before
@@ -1902,11 +2090,24 @@ void Pipeline::Impl::ProducerLoop(int id) {
             if (stopped_mid) break;
         }
         // Demux returned false with frames still wanted: on a live RTSP
-        // source that is a disconnect (farm streams never end cleanly).
-        // Route it through the same retry path as an exception. Skipped
-        // entirely on a deliberate Stop() (wanted() already false).
-        if (wanted())
+        // source that is a disconnect (farm streams never end cleanly), so
+        // route it through the same retry path as an exception. A file
+        // source, though, has a legitimate end - av_read_frame delivers a
+        // genuine AVERROR_EOF at the true end of the file (confirmed by the
+        // prior investigation, see CORDERO manual/FINDINGS.md's "MP4 file
+        // input fails" entry), and requesting more frames than the file
+        // contains is not a disconnect to retry, it's just a shorter-than-
+        // asked-for clean run. Skipped entirely on a deliberate Stop()
+        // (wanted() already false).
+        if (wanted()) {
+            if (url.rfind("rtsp://", 0) != 0) {
+                Logf("stream %d (%s): file source reached end of stream "
+                     "after %d frames - clean completion",
+                     id, url.c_str(), decoded);
+                break;  // same clean-completion exit as decoded >= max_frames
+            }
             throw std::runtime_error("demux ended (stream disconnected)");
+        }
     } catch (const std::exception& e) {
         const int silent_ms =
             (int)std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1959,10 +2160,14 @@ void Pipeline::Impl::GpuLoop() {
         // replacing the BoxDecodeBatched+NmsBatched pair below. Everything
         // downstream (h_kept/h_kept_counts layout, cascade, sinks, results)
         // is unchanged either way.
-        if (plan.l0_family == Family::YoloE2E) {
+        if (plan.l0_family == Family::YoloE2E ||
+            plan.l0_family == Family::RtDetr) {
             LaunchYoloE2EBatched(engine->OutputPtr(), n, max_dets, d_params,
-                                plan.score_thresh, d_kept, d_kept_counts,
-                                gpu_stream);
+                                plan.score_thresh,
+                                /*norm_cxcywh=*/plan.l0_family ==
+                                    Family::RtDetr,
+                                (float)net_w, (float)net_h, d_kept,
+                                d_kept_counts, gpu_stream);
         } else {
             LaunchBoxDecodeBatched(engine->OutputPtr(), n, anchors, classes,
                                    d_params, plan.score_thresh, d_cands,
@@ -2029,11 +2234,11 @@ void Pipeline::Impl::GpuLoop() {
                                      r.y, r.w, r.h};
                         tparams[t] = {};
                         // tile -> engine input letterbox geometry
-                        const float sc = std::min((float)kNetW / r.w,
-                                                  (float)kNetH / r.h);
+                        const float sc = std::min((float)net_w / r.w,
+                                                  (float)net_h / r.h);
                         tparams[t].lb = LetterboxInfo{
-                            sc, (int)((kNetW - r.w * sc) / 2),
-                            (int)((kNetH - r.h * sc) / 2)};
+                            sc, (int)((net_w - r.w * sc) / 2),
+                            (int)((net_h - r.h * sc) / 2)};
                         tparams[t].src_w = r.w;
                         tparams[t].src_h = r.h;
                         tparams[t].off_x = r.x;
@@ -2044,7 +2249,7 @@ void Pipeline::Impl::GpuLoop() {
                                     cudaMemcpyHostToDevice, gpu_stream);
                     // NOTE: tiles are square (== engine input) except at
                     // frame edges, where the crop kernel's resize to
-                    // kNetW x kNetH matches the letterbox above only if the
+                    // net_w x net_h matches the letterbox above only if the
                     // tile is square; edge tiles from MakeTileGrid are
                     // always tile_px x tile_px (pulled back flush), or
                     // full-span when the frame is smaller - both
@@ -2055,7 +2260,7 @@ void Pipeline::Impl::GpuLoop() {
                     // defaults preserve today's hardcoded YOLO-tile
                     // behavior.
                     LaunchNv12CropResizeBatched(d_sahi_crops, nt, d_sahi_in,
-                                                kNetW, kNetH,
+                                                net_w, net_h,
                                                 ToFloat3(plan.l0_norm_offset),
                                                 ToFloat3(plan.l0_norm_scale),
                                                 gpu_stream,
@@ -2160,10 +2365,10 @@ void Pipeline::Impl::GpuLoop() {
                     job.params = {};
                     // tile -> engine input letterbox geometry
                     const float sc =
-                        std::min((float)kNetW / r.w, (float)kNetH / r.h);
+                        std::min((float)net_w / r.w, (float)net_h / r.h);
                     job.params.lb = LetterboxInfo{
-                        sc, (int)((kNetW - r.w * sc) / 2),
-                        (int)((kNetH - r.h * sc) / 2)};
+                        sc, (int)((net_w - r.w * sc) / 2),
+                        (int)((net_h - r.h * sc) / 2)};
                     job.params.src_w = r.w;
                     job.params.src_h = r.h;
                     job.params.off_x = r.x;
@@ -2186,7 +2391,7 @@ void Pipeline::Impl::GpuLoop() {
                                 nt * sizeof(CropParams),
                                 cudaMemcpyHostToDevice, gpu_stream);
                 // NOTE: tiles are square (== engine input) except at frame
-                // edges, where the crop kernel's resize to kNetW x kNetH
+                // edges, where the crop kernel's resize to net_w x net_h
                 // matches the letterbox above only if the tile is square;
                 // edge tiles from MakeTileGrid are always tile_px x tile_px
                 // (pulled back flush), or full-span when the frame is
@@ -2195,8 +2400,8 @@ void Pipeline::Impl::GpuLoop() {
                 // M1a/M3a: same layer-0-engine per-channel norm/color as
                 // the serial path above (ExecPlan::l0_*) - defaults
                 // preserve today's hardcoded YOLO-tile behavior.
-                LaunchNv12CropResizeBatched(d_sahi_crops, nt, d_sahi_in, kNetW,
-                                            kNetH, ToFloat3(plan.l0_norm_offset),
+                LaunchNv12CropResizeBatched(d_sahi_crops, nt, d_sahi_in, net_w,
+                                            net_h, ToFloat3(plan.l0_norm_offset),
                                             ToFloat3(plan.l0_norm_scale),
                                             gpu_stream,
                                             /*rgb=*/plan.l0_rgb);
@@ -2274,6 +2479,28 @@ void Pipeline::Impl::GpuLoop() {
         std::vector<std::vector<std::vector<int>>> child_labels(children.size());
         std::vector<std::vector<std::vector<float>>> child_label_scores(
             children.size());
+        // T3.1: per-child -> per-slot -> per-detection raw [D] rows
+        // (Embedding children only; empty otherwise - mirrors the
+        // exactly-one-populated contract of the three containers above).
+        std::vector<std::vector<std::vector<std::vector<float>>>> child_vectors(
+            children.size());
+        // CP1: this child's own GPU-stream time for THIS batch
+        // (cudaEventElapsedTime(ev_start, ev_done) - see ChildScratch and
+        // result.h's ChildOutput::ms_gpu WHY-comment). Same value stamped
+        // on every result of this batch for a given child (mirrors
+        // ms_take_to_done's whole-batch semantics, just per child). Filled
+        // by BOTH paths below - events cost ~nothing, and stamping it
+        // either way is what lets an A/B run (qa_matrix.py section J)
+        // compare like for like.
+        std::vector<double> child_ms_gpu(children.size(), 0.0);
+        // R1 routing (Select): per-child views over the SHARED h_crops.
+        // child_pass[ci] = indices into h_crops passing child ci's
+        // predicate; child_crops[ci] = those CropParams gathered
+        // contiguously (what the chunk loops upload). Both empty for an
+        // unfiltered child, which keeps using h_crops/crop_owner directly
+        // - the pre-R1 path, untouched.
+        std::vector<std::vector<int>> child_pass(children.size());
+        std::vector<std::vector<CropParams>> child_crops(children.size());
         if (!children.empty()) {
             h_crops.clear();
             crop_owner.clear();
@@ -2299,86 +2526,333 @@ void Pipeline::Impl::GpuLoop() {
                 }
             }
 
+            // Per-child output containers: pure host bookkeeping from
+            // h_kept_counts alone (no GPU dependency), so this is shared by
+            // both paths below rather than duplicated in each.
             for (size_t ci = 0; ci < children.size(); ci++) {
-                ChildScratch& cs = children[ci];
                 const ChildPlan& cp = plan.children[ci];
                 const bool is_argmax = cp.family == Family::Argmax;
+                const bool is_embed = cp.family == Family::Embedding;
                 std::vector<std::vector<std::string>>& c_texts = child_texts[ci];
                 std::vector<std::vector<int>>& c_labels = child_labels[ci];
                 std::vector<std::vector<float>>& c_scores =
                     child_label_scores[ci];
+                std::vector<std::vector<std::vector<float>>>& c_vecs =
+                    child_vectors[ci];
                 c_texts.assign(n, {});
                 c_labels.assign(n, {});
                 c_scores.assign(n, {});
+                c_vecs.assign(n, {});
                 for (int s = 0; s < n; s++) {
                     if (is_argmax) {
                         c_labels[s].resize(h_kept_counts[s]);
                         c_scores[s].resize(h_kept_counts[s]);
+                    } else if (is_embed) {
+                        c_vecs[s].resize(h_kept_counts[s]);
                     } else {
                         c_texts[s].resize(h_kept_counts[s]);
                     }
                 }
-                // Chunked by THIS child's own engine profile; crops land
-                // directly in its input binding (kernel slot stride ==
-                // InputCount) - children can differ in MaxBatch/input size,
-                // so each gets its own chunk loop over the SHARED h_crops.
-                const int cmb = cs.engine->MaxBatch();
-                for (size_t off = 0; off < h_crops.size(); off += cmb) {
-                    const int nc =
-                        (int)std::min(h_crops.size() - off, (size_t)cmb);
-                    cudaMemcpyAsync(cs.d_crops, h_crops.data() + off,
-                                    nc * sizeof(CropParams),
-                                    cudaMemcpyHostToDevice, gpu_stream);
-                    // M1a/M3a/M4b: this child's resolved per-channel
-                    // norm/color (see ChildPlan::norm_offset[3]/
-                    // norm_scale[3]/rgb) - defaults preserve today's
-                    // hardcoded LPRNet/cv2 (-127.5, 1/128, BGR) behavior; a
-                    // classifier child can instead carry true per-channel
-                    // ImageNet norm, independently of its siblings.
-                    LaunchNv12CropResizeBatched(cs.d_crops, nc,
-                                                cs.engine->InputPtr(), cs.w,
-                                                cs.h, ToFloat3(cp.norm_offset),
-                                                ToFloat3(cp.norm_scale),
-                                                gpu_stream,
-                                                /*rgb=*/cp.rgb != 0);
-                    cs.engine->SetBatch(nc);
-                    cs.engine->Infer(gpu_stream);
-                    if (is_argmax) {
-                        // GPU argmax straight off the engine's output
-                        // binding (no per-crop CPU decode loop, unlike Ctc
-                        // below - see LaunchArgmaxBatched's WHY-comment in
-                        // postprocess.h): D2H only the compact (label,score)
-                        // pairs, not the full logits.
-                        LaunchArgmaxBatched(cs.engine->OutputPtr(), nc,
-                                            cs.classes, cs.d_argmax_labels,
-                                            cs.d_argmax_scores, gpu_stream);
-                        cudaMemcpyAsync(cs.h_argmax_labels.data(),
-                                        cs.d_argmax_labels, nc * sizeof(int),
-                                        cudaMemcpyDeviceToHost, gpu_stream);
-                        cudaMemcpyAsync(cs.h_argmax_scores.data(),
-                                        cs.d_argmax_scores, nc * sizeof(float),
-                                        cudaMemcpyDeviceToHost, gpu_stream);
+            }
+
+            // R1 routing: evaluate each filtered child's predicate ONCE
+            // per batch over the shared crop list (host-side, tens of
+            // items). Criteria: class membership + min score (from the
+            // detection) and min crop side (from the CLAMPED rect - what
+            // the child would actually see). All-off = pass-all, matching
+            // an empty Select() - the parity case.
+            for (size_t ci = 0; ci < children.size(); ci++) {
+                const ChildPlan& cp = plan.children[ci];
+                if (!cp.filtered) continue;
+                std::vector<int>& pass = child_pass[ci];
+                std::vector<CropParams>& crops = child_crops[ci];
+                pass.clear();
+                crops.clear();
+                for (size_t c = 0; c < h_crops.size(); c++) {
+                    const auto& owner = crop_owner[c];
+                    const GpuDetection& d =
+                        h_kept[(size_t)owner.first * kMaxNmsCandidates +
+                               owner.second];
+                    if (!cp.sel_classes.empty() &&
+                        std::find(cp.sel_classes.begin(),
+                                  cp.sel_classes.end(),
+                                  d.cls) == cp.sel_classes.end())
+                        continue;
+                    if (cp.sel_min_score > 0.f && d.score < cp.sel_min_score)
+                        continue;
+                    if (cp.sel_min_size > 0.f &&
+                        (float)std::min(h_crops[c].w, h_crops[c].h) <
+                            cp.sel_min_size)
+                        continue;
+                    pass.push_back((int)c);
+                    crops.push_back(h_crops[c]);
+                }
+            }
+
+            if (plan.cascade_serial) {
+                // ---- CP1 A/B escape hatch (PipelineConfig::cascade_serial
+                // == true): today's SEQUENTIAL path, UNCHANGED - every
+                // child fully chunked/inferred/decoded on the single shared
+                // gpu_stream before the next child starts. ev_start/ev_done
+                // bracket each child's own chunk loop on gpu_stream - "the
+                // child's stream" IS the main stream here (see result.h's
+                // ChildOutput::ms_gpu WHY-comment for what that means
+                // versus the parallel path below).
+                for (size_t ci = 0; ci < children.size(); ci++) {
+                    ChildScratch& cs = children[ci];
+                    const ChildPlan& cp = plan.children[ci];
+                    const bool is_argmax = cp.family == Family::Argmax;
+                    const bool is_embed = cp.family == Family::Embedding;
+                    std::vector<std::vector<std::string>>& c_texts = child_texts[ci];
+                    std::vector<std::vector<int>>& c_labels = child_labels[ci];
+                    std::vector<std::vector<float>>& c_scores =
+                        child_label_scores[ci];
+                    std::vector<std::vector<std::vector<float>>>& c_vecs =
+                        child_vectors[ci];
+                    // Chunked by THIS child's own engine profile; crops land
+                    // directly in its input binding (kernel slot stride ==
+                    // InputCount) - children can differ in MaxBatch/input
+                    // size, so each gets its own chunk loop over the SHARED
+                    // h_crops (or, R1, its routed subset of it).
+                    const std::vector<CropParams>& crops =
+                        cp.filtered ? child_crops[ci] : h_crops;
+                    const std::vector<int>* pass =
+                        cp.filtered ? &child_pass[ci] : nullptr;
+                    const int cmb = cs.engine->MaxBatch();
+                    cudaEventRecord(cs.ev_start, gpu_stream);
+                    for (size_t off = 0; off < crops.size(); off += cmb) {
+                        const int nc =
+                            (int)std::min(crops.size() - off, (size_t)cmb);
+                        cudaMemcpyAsync(cs.d_crops, crops.data() + off,
+                                        nc * sizeof(CropParams),
+                                        cudaMemcpyHostToDevice, gpu_stream);
+                        // M1a/M3a/M4b: this child's resolved per-channel
+                        // norm/color (see ChildPlan::norm_offset[3]/
+                        // norm_scale[3]/rgb) - defaults preserve today's
+                        // hardcoded LPRNet/cv2 (-127.5, 1/128, BGR) behavior;
+                        // a classifier child can instead carry true
+                        // per-channel ImageNet norm, independently of its
+                        // siblings.
+                        LaunchNv12CropResizeBatched(cs.d_crops, nc,
+                                                    cs.engine->InputPtr(), cs.w,
+                                                    cs.h, ToFloat3(cp.norm_offset),
+                                                    ToFloat3(cp.norm_scale),
+                                                    gpu_stream,
+                                                    /*rgb=*/cp.rgb != 0);
+                        cs.engine->SetBatch(nc);
+                        cs.engine->Infer(gpu_stream);
+                        if (is_argmax) {
+                            // GPU argmax straight off the engine's output
+                            // binding (no per-crop CPU decode loop, unlike
+                            // Ctc below - see LaunchArgmaxBatched's
+                            // WHY-comment in postprocess.h): D2H only the
+                            // compact (label,score) pairs, not the full
+                            // logits.
+                            LaunchArgmaxBatched(cs.engine->OutputPtr(), nc,
+                                                cs.classes, cs.d_argmax_labels,
+                                                cs.d_argmax_scores, gpu_stream);
+                            cudaMemcpyAsync(cs.h_argmax_labels.data(),
+                                            cs.d_argmax_labels, nc * sizeof(int),
+                                            cudaMemcpyDeviceToHost, gpu_stream);
+                            cudaMemcpyAsync(cs.h_argmax_scores.data(),
+                                            cs.d_argmax_scores, nc * sizeof(float),
+                                            cudaMemcpyDeviceToHost, gpu_stream);
+                            cudaEventRecord(cs.ev_done, gpu_stream);
+                            cudaStreamSynchronize(gpu_stream);
+                            for (int c = 0; c < nc; c++) {
+                                const auto& owner = crop_owner[
+                                    pass ? (size_t)(*pass)[off + c] : off + c];
+                                c_labels[owner.first][owner.second] =
+                                    cs.h_argmax_labels[c];
+                                c_scores[owner.first][owner.second] =
+                                    cs.h_argmax_scores[c];
+                            }
+                        } else {
+                            cudaMemcpyAsync(cs.h_logits.data(),
+                                            cs.engine->OutputPtr(),
+                                            (size_t)nc * cs.engine->OutputCount() *
+                                                sizeof(float),
+                                            cudaMemcpyDeviceToHost, gpu_stream);
+                            cudaEventRecord(cs.ev_done, gpu_stream);
+                            cudaStreamSynchronize(gpu_stream);
+                            for (int c = 0; c < nc; c++) {
+                                const auto& owner = crop_owner[
+                                    pass ? (size_t)(*pass)[off + c] : off + c];
+                                const float* row =
+                                    cs.h_logits.data() +
+                                    (size_t)c * cs.engine->OutputCount();
+                                if (is_embed) {
+                                    // T3.1: the raw row IS the result -
+                                    // no decode (see the Setup branch).
+                                    c_vecs[owner.first][owner.second]
+                                        .assign(row,
+                                                row + cs.engine->OutputCount());
+                                } else {
+                                    const auto label = CtcGreedyDecode(
+                                        row, cs.classes, cs.steps);
+                                    c_texts[owner.first][owner.second] =
+                                        LprLabelString(label);
+                                }
+                            }
+                        }
+                    }
+                    // No crops this batch: the loop above never ran, so
+                    // ev_done was never (re-)recorded past ev_start - record
+                    // it here instead of reading a stale pair left over from
+                    // (or never set since) an earlier batch.
+                    if (crops.empty()) {
+                        cudaEventRecord(cs.ev_done, gpu_stream);
                         cudaStreamSynchronize(gpu_stream);
-                        for (int c = 0; c < nc; c++) {
-                            const auto& owner = crop_owner[off + c];
+                    }
+                    float ms = 0.f;
+                    cudaEventElapsedTime(&ms, cs.ev_start, cs.ev_done);
+                    child_ms_gpu[ci] = ms;
+                }
+            } else {
+                // ---- CP1 default (PipelineConfig::cascade_serial ==
+                // false): per-child CUDA-stream PARALLELISM. Each child's
+                // ENTIRE pipeline (every chunk's H2D crop upload,
+                // crop-resize kernel, infer, D2H of its outputs) is enqueued
+                // on its OWN stream (ChildScratch::stream) with NO
+                // synchronization against siblings in between - concurrent
+                // enqueueV3() across distinct TrtEngine execution contexts
+                // is legal (each child owns its own context + input/output
+                // bindings - see TrtEngine.h - and every OTHER piece of
+                // per-child scratch touched below, d_crops/d_argmax_*/
+                // h_logits/h_argmax_*, is likewise exclusively this child's
+                // own; h_crops/crop_owner, the only state shared ACROSS
+                // children here, are built once above and read-only from
+                // this point on). Multiple chunks of the SAME child (crop
+                // count > that child's own MaxBatch) still enqueue safely
+                // with no inter-chunk sync either - CUDA's same-stream FIFO
+                // ordering alone guarantees chunk 2's ops don't touch
+                // cs.d_crops/the engine's bindings until chunk 1's are done
+                // with them; that's what "chunking > MaxBatch stays
+                // sequential WITHIN a child's stream" falls out of, for
+                // free.
+                //
+                // The one thing that same-stream ordering does NOT protect
+                // is the HOST decode buffer: unlike the serial path above,
+                // nothing here may synchronize until every child is fully
+                // enqueued (that's the whole point), so decode cannot run
+                // inline per chunk - a second chunk's D2H would otherwise
+                // land on top of the first chunk's still-unread
+                // cs.h_logits/cs.h_argmax_* before the CPU ever gets to read
+                // it. So each child's host decode buffer is grown (only
+                // when needed - cheap/no-op once warm) to hold this WHOLE
+                // batch's crops for that child, each chunk's D2H lands at
+                // its own offset into it, and decode is deferred to the
+                // JOIN phase below, once, over the full buffer.
+                for (size_t ci = 0; ci < children.size(); ci++) {
+                    ChildScratch& cs = children[ci];
+                    const ChildPlan& cp = plan.children[ci];
+                    const bool is_argmax = cp.family == Family::Argmax;
+                    // R1 routing: this child's crop view (see the serial
+                    // path above). child_crops/child_pass are per-child
+                    // (each iteration touches only its own ci slot), so the
+                    // read-only-shared-state argument in the WHY-comment
+                    // above extends to them unchanged.
+                    const std::vector<CropParams>& crops =
+                        cp.filtered ? child_crops[ci] : h_crops;
+                    const int cmb = cs.engine->MaxBatch();
+                    const size_t total = crops.size();
+                    if (is_argmax) {
+                        if (cs.h_argmax_labels.size() < total)
+                            cs.h_argmax_labels.resize(total);
+                        if (cs.h_argmax_scores.size() < total)
+                            cs.h_argmax_scores.resize(total);
+                    } else {
+                        const size_t need = total * cs.engine->OutputCount();
+                        if (cs.h_logits.size() < need) cs.h_logits.resize(need);
+                    }
+                    cudaEventRecord(cs.ev_start, cs.stream);
+                    for (size_t off = 0; off < total; off += cmb) {
+                        const int nc = (int)std::min(total - off, (size_t)cmb);
+                        cudaMemcpyAsync(cs.d_crops, crops.data() + off,
+                                        nc * sizeof(CropParams),
+                                        cudaMemcpyHostToDevice, cs.stream);
+                        // M1a/M3a/M4b: this child's resolved per-channel
+                        // norm/color, same convention as the serial path
+                        // above.
+                        LaunchNv12CropResizeBatched(cs.d_crops, nc,
+                                                    cs.engine->InputPtr(), cs.w,
+                                                    cs.h, ToFloat3(cp.norm_offset),
+                                                    ToFloat3(cp.norm_scale),
+                                                    cs.stream,
+                                                    /*rgb=*/cp.rgb != 0);
+                        cs.engine->SetBatch(nc);
+                        cs.engine->Infer(cs.stream);
+                        if (is_argmax) {
+                            LaunchArgmaxBatched(cs.engine->OutputPtr(), nc,
+                                                cs.classes, cs.d_argmax_labels,
+                                                cs.d_argmax_scores, cs.stream);
+                            cudaMemcpyAsync(cs.h_argmax_labels.data() + off,
+                                            cs.d_argmax_labels, nc * sizeof(int),
+                                            cudaMemcpyDeviceToHost, cs.stream);
+                            cudaMemcpyAsync(cs.h_argmax_scores.data() + off,
+                                            cs.d_argmax_scores, nc * sizeof(float),
+                                            cudaMemcpyDeviceToHost, cs.stream);
+                        } else {
+                            cudaMemcpyAsync(
+                                cs.h_logits.data() +
+                                    off * cs.engine->OutputCount(),
+                                cs.engine->OutputPtr(),
+                                (size_t)nc * cs.engine->OutputCount() *
+                                    sizeof(float),
+                                cudaMemcpyDeviceToHost, cs.stream);
+                        }
+                    }
+                    cudaEventRecord(cs.ev_done, cs.stream);
+                }
+
+                // ---- Join phase: sync each child's OWN stream (order
+                // across children doesn't matter here - every child was
+                // already fully enqueued above), then decode from that
+                // child's now-complete host buffer. Ring slots
+                // (b->meta[*].nv12) were only ever a read-only input to the
+                // H2D crop uploads above; they're released by the existing
+                // loop further down, AFTER this join phase returns, so
+                // running the children concurrently doesn't change when
+                // that release is safe to do.
+                for (size_t ci = 0; ci < children.size(); ci++) {
+                    ChildScratch& cs = children[ci];
+                    const ChildPlan& cp = plan.children[ci];
+                    const bool is_argmax = cp.family == Family::Argmax;
+                    const bool is_embed = cp.family == Family::Embedding;
+                    std::vector<std::vector<std::string>>& c_texts = child_texts[ci];
+                    std::vector<std::vector<int>>& c_labels = child_labels[ci];
+                    std::vector<std::vector<float>>& c_scores =
+                        child_label_scores[ci];
+                    std::vector<std::vector<std::vector<float>>>& c_vecs =
+                        child_vectors[ci];
+                    const std::vector<CropParams>& crops =
+                        cp.filtered ? child_crops[ci] : h_crops;
+                    const std::vector<int>* pass =
+                        cp.filtered ? &child_pass[ci] : nullptr;
+                    cudaStreamSynchronize(cs.stream);
+                    float ms = 0.f;
+                    cudaEventElapsedTime(&ms, cs.ev_start, cs.ev_done);
+                    child_ms_gpu[ci] = ms;
+                    for (size_t c = 0; c < crops.size(); c++) {
+                        const auto& owner =
+                            crop_owner[pass ? (size_t)(*pass)[c] : c];
+                        if (is_argmax) {
                             c_labels[owner.first][owner.second] =
                                 cs.h_argmax_labels[c];
                             c_scores[owner.first][owner.second] =
                                 cs.h_argmax_scores[c];
-                        }
-                    } else {
-                        cudaMemcpyAsync(cs.h_logits.data(),
-                                        cs.engine->OutputPtr(),
-                                        (size_t)nc * cs.engine->OutputCount() *
-                                            sizeof(float),
-                                        cudaMemcpyDeviceToHost, gpu_stream);
-                        cudaStreamSynchronize(gpu_stream);
-                        for (int c = 0; c < nc; c++) {
+                        } else if (is_embed) {
+                            // T3.1: raw row pass-through (see serial path).
+                            const float* row =
+                                cs.h_logits.data() +
+                                c * cs.engine->OutputCount();
+                            c_vecs[owner.first][owner.second].assign(
+                                row, row + cs.engine->OutputCount());
+                        } else {
                             const auto label = CtcGreedyDecode(
                                 cs.h_logits.data() +
-                                    (size_t)c * cs.engine->OutputCount(),
+                                    c * cs.engine->OutputCount(),
                                 cs.classes, cs.steps);
-                            const auto& owner = crop_owner[off + c];
                             c_texts[owner.first][owner.second] =
                                 LprLabelString(label);
                         }
@@ -2477,15 +2951,24 @@ void Pipeline::Impl::GpuLoop() {
                 for (size_t ci = 0; ci < children.size(); ci++) {
                     ChildOutput co;
                     co.layer = (int)ci + 1;  // cfg.layers index (0 = detector)
-                    const bool is_argmax =
-                        plan.children[ci].family == Family::Argmax;
-                    if (is_argmax) {
+                    // CP1: same value for every slot of this batch (mirrors
+                    // ms_take_to_done - see child_ms_gpu's own WHY-comment
+                    // above, and ChildOutput::ms_gpu in result.h).
+                    co.ms_gpu = child_ms_gpu[ci];
+                    const Family cf = plan.children[ci].family;
+                    if (cf == Family::Argmax) {
                         co.labels = child_labels[ci][s];
                         co.label_scores = child_label_scores[ci][s];
                         if ((int)ci == first_argmax_child) {
                             fr.labels = co.labels;
                             fr.label_scores = co.label_scores;
                         }
+                    } else if (cf == Family::Embedding) {
+                        // T3.1: no back-compat flat field - the family is
+                        // new, ChildOutput::vectors is its only surface.
+                        // Move, not copy: each (child, slot) cell is read
+                        // exactly once, and rows are D floats each.
+                        co.vectors = std::move(child_vectors[ci][s]);
                     } else {
                         co.texts = child_texts[ci][s];
                         if ((int)ci == first_ctc_child) fr.texts = co.texts;

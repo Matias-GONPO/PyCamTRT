@@ -221,6 +221,42 @@ std::vector<GpuDetection> CpuYoloE2E(const float* raw, int max_dets,
     return out;
 }
 
+// rtdetr-variant reference (report 11 T3.2): mirrors the KERNEL's own
+// norm_cxcywh math exactly (row * net, corners via 0.5f*w, then the same
+// shared affine as CpuYoloE2E) - plain IEEE-754 single-op float
+// arithmetic both sides, so bit-identical, same as CpuYoloE2E's contract.
+std::vector<GpuDetection> CpuRtDetr(const float* raw, int max_dets,
+                                    const PostprocImageParams& p,
+                                    float thresh) {
+    std::vector<GpuDetection> out;
+    for (int i = 0; i < max_dets; i++) {
+        const float* row = raw + (size_t)i * 6;
+        const float score = row[4];
+        if (score < thresh) continue;
+        const float cx = row[0] * 640.f, cy = row[1] * 640.f;
+        const float bw = row[2] * 640.f, bh = row[3] * 640.f;
+        const float bx0 = cx - 0.5f * bw, by0 = cy - 0.5f * bh;
+        const float bx1 = cx + 0.5f * bw, by1 = cy + 0.5f * bh;
+        float x0 = (bx0 - (float)p.lb.pad_x) / p.lb.scale;
+        float y0 = (by0 - (float)p.lb.pad_y) / p.lb.scale;
+        float x1 = (bx1 - (float)p.lb.pad_x) / p.lb.scale;
+        float y1 = (by1 - (float)p.lb.pad_y) / p.lb.scale;
+        x0 = std::max(x0, 0.f);
+        y0 = std::max(y0, 0.f);
+        x1 = std::min(x1, (float)p.src_w);
+        y1 = std::min(y1, (float)p.src_h);
+        GpuDetection d;
+        d.x = x0 + (float)p.off_x;
+        d.y = y0 + (float)p.off_y;
+        d.w = std::max(x1 - x0, 0.f);
+        d.h = std::max(y1 - y0, 0.f);
+        d.score = score;
+        d.cls = (int)std::lround(row[5]);
+        out.push_back(d);
+    }
+    return out;
+}
+
 // Canonical order for comparing two nondeterministically-ordered kept
 // lists: every planted score in this test is unique WITHIN an image (see
 // the kPlant* tables above), so a plain score-descending sort is already
@@ -537,8 +573,8 @@ int main() {
     cudaStream_t e2e_stream;
     cudaStreamCreate(&e2e_stream);
     LaunchYoloE2EBatched(d_e2e_raw, kE2EBatch, kE2EMaxDets, d_e2e_params,
-                        kE2EScoreThresh, d_e2e_kept, d_e2e_kept_counts,
-                        e2e_stream);
+                        kE2EScoreThresh, /*norm_cxcywh=*/false, 640.f, 640.f,
+                        d_e2e_kept, d_e2e_kept_counts, e2e_stream);
     std::vector<std::vector<GpuDetection>> e2e_got(
         kE2EBatch, std::vector<GpuDetection>(kMaxNmsCandidates));
     int e2e_got_counts[kE2EBatch];
@@ -583,16 +619,74 @@ int main() {
            e2e_construction_ok ? "✓" : "✗");
     e2e_ok = e2e_ok && e2e_construction_ok;
 
+    printf(e2e_ok ? "✓ PASS: yolo-e2e checkpoint.\n"
+                 : "✗ FAIL: yolo-e2e checkpoint.\n");
+
+    // ---- rtdetr variant checkpoint (report 11 T3.2) --------------------
+    // The SAME planted content re-expressed in the rtdetr row layout:
+    // every row's pixel x1,y1,x2,y2 converted (host-side, once, plain
+    // float ops) to normalized cx,cy,w,h. Score/cls columns untouched, so
+    // the survivor SET matches the e2e section's construction counts;
+    // geometry may drift a float-rounding hair from the e2e numbers, which
+    // is fine - the comparison is kernel-vs-CpuRtDetr on the SAME stored
+    // rows, both running bit-identical math (see CpuRtDetr's comment).
+    printf("\n--- rtdetr variant (normalized cxcywh rows, same kernel) ---\n");
+    std::vector<float> rt_host = e2e_host;
+    for (size_t r = 0; r < rt_host.size() / 6; r++) {
+        float* row = rt_host.data() + r * 6;
+        const float x1 = row[0], y1 = row[1], x2 = row[2], y2 = row[3];
+        row[0] = 0.5f * (x1 + x2) / 640.f;  // cx (normalized)
+        row[1] = 0.5f * (y1 + y2) / 640.f;  // cy
+        row[2] = (x2 - x1) / 640.f;         // w
+        row[3] = (y2 - y1) / 640.f;         // h
+    }
+    std::vector<std::vector<GpuDetection>> rt_ref(kE2EBatch);
+    for (int i = 0; i < kE2EBatch; i++) {
+        rt_ref[i] = CpuRtDetr(rt_host.data() + (size_t)i * kE2EMaxDets * 6,
+                              kE2EMaxDets, e2e_params[i], kE2EScoreThresh);
+        SortByScoreDesc(&rt_ref[i]);
+    }
+    cudaMemcpy(d_e2e_raw, rt_host.data(), rt_host.size() * sizeof(float),
+               cudaMemcpyHostToDevice);
+    LaunchYoloE2EBatched(d_e2e_raw, kE2EBatch, kE2EMaxDets, d_e2e_params,
+                        kE2EScoreThresh, /*norm_cxcywh=*/true, 640.f, 640.f,
+                        d_e2e_kept, d_e2e_kept_counts, e2e_stream);
+    std::vector<std::vector<GpuDetection>> rt_got(
+        kE2EBatch, std::vector<GpuDetection>(kMaxNmsCandidates));
+    int rt_got_counts[kE2EBatch];
+    for (int i = 0; i < kE2EBatch; i++) {
+        cudaMemcpyAsync(rt_got[i].data(),
+                        d_e2e_kept + (size_t)i * kMaxNmsCandidates,
+                        kMaxNmsCandidates * sizeof(GpuDetection),
+                        cudaMemcpyDeviceToHost, e2e_stream);
+        cudaMemcpyAsync(&rt_got_counts[i], d_e2e_kept_counts + i, sizeof(int),
+                        cudaMemcpyDeviceToHost, e2e_stream);
+    }
+    cudaStreamSynchronize(e2e_stream);
+    bool rt_ok = true;
+    for (int i = 0; i < kE2EBatch; i++) {
+        rt_got[i].resize(rt_got_counts[i]);
+        SortByScoreDesc(&rt_got[i]);
+        const bool same = SameDetections(rt_ref[i], (int)rt_ref[i].size(),
+                                         rt_got[i], rt_got_counts[i]);
+        // Same construction contract as the e2e section: survivor count
+        // must equal the planted count (score columns are untouched).
+        const bool cons = (int)rt_ref[i].size() == n_planted[i];
+        rt_ok = rt_ok && same && cons;
+        printf("img %d (%-19s): CPU ref kept %3d | GPU kept %3d | %s\n", i,
+               e2e_label[i], (int)rt_ref[i].size(), rt_got_counts[i],
+               same && cons ? "bit-exact ✓" : "MISMATCH ✗");
+    }
+    printf(rt_ok ? "✓ PASS: rtdetr variant checkpoint.\n"
+                 : "✗ FAIL: rtdetr variant checkpoint.\n");
+
     cudaStreamDestroy(e2e_stream);
     cudaFree(d_e2e_raw);
     cudaFree(d_e2e_kept);
     cudaFree(d_e2e_kept_counts);
     cudaFree(d_e2e_params);
 
-    printf(e2e_ok ? "✓ PASS: yolo-e2e checkpoint.\n"
-                 : "✗ FAIL: yolo-e2e checkpoint.\n");
-
-    ok = ok && ax_ok && e2e_ok;
+    ok = ok && ax_ok && e2e_ok && rt_ok;
     printf(ok ? "\n✓ PASS: all postprocess checkpoints.\n"
               : "\n✗ FAIL: at least one postprocess checkpoint failed.\n");
     return ok ? 0 : 1;

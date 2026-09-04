@@ -15,22 +15,56 @@
 #include <string>
 #include <vector>
 
+#include "EngineBuilder.h"
+
 class TrtEngine {
 public:
-    explicit TrtEngine(const std::string& engine_path) {
-        std::ifstream file(engine_path, std::ios::binary);
-        if (!file.good()) {
-            throw std::runtime_error("Cannot open engine file: " + engine_path);
+    explicit TrtEngine(const std::string& engine_path,
+                       const enginebuilder::BuildPrefs& build_prefs = {}) {
+        // R3 auto-build: a .onnx path resolves to its house-named cache
+        // next to the file (<stem>_b1-<max>_fp16_sm<XY>.engine), built
+        // ONCE if absent. A cache that later fails to deserialize (TRT
+        // version drift after an upgrade) is rebuilt once and retried -
+        // never silently used, never rebuilt in a loop. Plain .engine
+        // paths behave exactly as before this feature existed.
+        std::string path = engine_path;
+        const bool from_onnx =
+            engine_path.size() > 5 &&
+            engine_path.compare(engine_path.size() - 5, 5, ".onnx") == 0;
+        if (from_onnx) {
+            path = enginebuilder::CachePathFor(engine_path, build_prefs);
+            std::ifstream probe(path, std::ios::binary);
+            if (!probe.good()) {
+                enginebuilder::BuildEngineFromOnnx(engine_path, build_prefs,
+                                                   path, logger_);
+            }
         }
-        file.seekg(0, std::ios::end);
-        const size_t size = file.tellg();
-        file.seekg(0, std::ios::beg);
-        std::vector<char> data(size);
-        file.read(data.data(), size);
 
         runtime_ = nvinfer1::createInferRuntime(logger_);
-        engine_ = runtime_->deserializeCudaEngine(data.data(), size);
-        if (!engine_) throw std::runtime_error("Failed to deserialize engine");
+        for (int attempt = 0;; attempt++) {
+            std::ifstream file(path, std::ios::binary);
+            if (!file.good()) {
+                throw std::runtime_error("Cannot open engine file: " + path);
+            }
+            file.seekg(0, std::ios::end);
+            const size_t size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            std::vector<char> data(size);
+            file.read(data.data(), size);
+            engine_ = runtime_->deserializeCudaEngine(data.data(), size);
+            if (engine_) break;
+            if (from_onnx && attempt == 0) {
+                fprintf(stderr,
+                        "[TrtEngine] cached engine %s failed to "
+                        "deserialize (TensorRT version drift?) - "
+                        "rebuilding once from %s\n",
+                        path.c_str(), engine_path.c_str());
+                enginebuilder::BuildEngineFromOnnx(engine_path, build_prefs,
+                                                   path, logger_);
+                continue;
+            }
+            throw std::runtime_error("Failed to deserialize engine: " + path);
+        }
         context_ = engine_->createExecutionContext();
 
         // One input, one output (yolov8n: images[N,3,640,640] ->

@@ -35,7 +35,7 @@ aligned with the same detection list - not plate-reading or object-
 classification correctness.
 
 Run it (see read_plates.py's docstring for the full canonical docker
-incantation, or CLAUDE.md)::
+incantation)::
 
     docker run --rm --gpus all --network host \\
         -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \\

@@ -15,7 +15,15 @@
 
 namespace cordero {
 
-enum class StepKind { Process, Engine, Postprocess };
+// Select (R1, v0.2.0): a declarative DETECTION FILTER between a detector's
+// Postprocess and a cascade child's Engine - the routing node ("send only
+// class-0 crops to this child"). Model-agnostic by construction: predicates
+// are comparisons over the GpuDetection struct (cls int, score, crop size),
+// never class NAMES - "person" is a model's opinion, not the library's.
+// Predicates must stay compilable (host-side comparisons in the crop-build
+// path); anything needing pixels or Python belongs to the
+// Python-on-results tier instead.
+enum class StepKind { Process, Engine, Postprocess, Select };
 // M1a: Argmax is the classifier family (plain max-logit, no softmax - see
 // postprocess.h's LaunchArgmaxBatched) alongside YoloDetect (layer 0) and
 // Ctc (today's LPRNet/OCR cascade family).
@@ -30,7 +38,13 @@ enum class StepKind { Process, Engine, Postprocess };
 // layer M1a-M4a supported. Every child must crop the ROOT's detections
 // directly; chaining a child off ANOTHER child's Postprocess (a child of a
 // child) is a named, deliberate rejection - see pipeline.cpp's Validate().
-enum class Family { YoloDetect, Ctc, Argmax, YoloE2E };
+// RtDetr (report 11 T3.2): yolo-e2e's twin - same [N,300,6] NMS-free head
+// contract, but box columns are NORMALIZED cx,cy,w,h (ultralytics RT-DETR
+// export) instead of pixel x1,y1,x2,y2; decoded by the same kernel with a
+// layout flag. Embedding (T3.1): raw pass-through cascade-child family
+// for 2D [N,D] feature heads - no decode kernel, rows land in
+// ChildOutput::vectors.
+enum class Family { YoloDetect, Ctc, Argmax, YoloE2E, Embedding, RtDetr };
 
 struct StepDesc {
     StepKind kind;
@@ -76,6 +90,22 @@ struct StepDesc {
     // lands in plane 0 and plane 2 - see preprocess.cu's c0/c2 selection),
     // so no further reordering is needed once the array is in this
     // convention.
+    // Select steps (R1): the routing predicate. A detection passes when it
+    // matches ALL active criteria; a zero/empty value means "criterion
+    // off" (an empty Select passes everything - the pass-all parity case).
+    // sel_min_size is min(crop w, crop h) in SOURCE pixels, measured on
+    // the post-clamp crop rectangle (what the child would actually see).
+    std::vector<int> sel_classes;   // empty = any class
+    float sel_min_score = 0.f;      // 0 = any score
+    float sel_min_size = 0.f;       // 0 = any size
+    // Engine steps, R3 auto-build preferences - used ONLY when engine_path
+    // is a .onnx (see EngineBuilder.h's BuildPrefs): dynamic-batch profile
+    // max, fp16 toggle, and explicit build H/W for exports whose spatial
+    // dims are symbolic (0 = take from the onnx, or 640x640 fallback).
+    int build_max_batch = 16;
+    bool build_fp16 = true;
+    int build_h = 0;
+    int build_w = 0;
     float norm_offset[3] = {NAN, NAN, NAN};
     float norm_scale[3] = {NAN, NAN, NAN};
     int color = -1;  // -1 = inherit, 0 = BGR, 1 = RGB
@@ -202,6 +232,20 @@ struct PipelineConfig {
     // pipeline that wants neither relay nor clip support out of that cost
     // entirely.
     int ring_seconds = 10;
+
+    // CP1: A/B escape hatch + regression isolation for per-child CUDA-stream
+    // cascade parallelism (same pattern as LayerDesc::sahi_serial above,
+    // just PIPELINE-wide rather than per-layer - unlike SAHI, which is tied
+    // to one specific yolo detection layer, the cascade is every sibling
+    // child 1..K acting together, so there is no single LayerDesc it
+    // belongs to). false (the default) = PARALLEL: every cascade child's
+    // entire pipeline (crop/infer/decode) is enqueued on its OWN
+    // cudaStream_t with no synchronization between children - concurrent
+    // enqueueV3() across distinct TrtEngine execution contexts is legal
+    // (see pipeline.cpp's ChildScratch/GpuLoop). true = today's SEQUENTIAL
+    // path, unchanged, kept for A/B measurement and to isolate a regression
+    // to "is it the parallelism" before anything else.
+    bool cascade_serial = false;
 
     std::function<void(const std::string&)> log;  // nullptr => fprintf(stderr,...)
 };

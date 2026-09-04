@@ -2,9 +2,9 @@
 """export_classifier.py - torchvision mobilenet_v3_small -> ONNX (dynamic
 batch), the M1b classifier-cascade demo's stage-2 engine source.
 
-House pattern (see export_lprnet.py): exports are committed (.onnx), engines
-are NOT (gitignored, built per-GPU via trtexec from this .onnx - see
-CLAUDE.md).
+House pattern: exports are committed (.onnx), engines are NOT (gitignored,
+built per-GPU - auto-built from this .onnx by Engine(), or via BUILD.md's
+trtexec appendix).
 
 Model: torchvision's pretrained mobilenet_v3_small (ImageNet-1k, 1000
 classes), used AS-IS (no forward-graph surgery needed - unlike LPRNet, this
@@ -68,7 +68,7 @@ def main():
               f"argmax class {y1.argmax(dim=1).item()}")
         assert tuple(y1.shape) == (1, 1000)
 
-        # Batch-decoupling sanity (same spirit as export_lprnet.py's check,
+        # Batch-decoupling sanity (same spirit as the LPRNet export's check in the CORDERO repo,
         # cheaper here since mobilenet_v3_small has no batch-coupled ops to
         # begin with - this just confirms that fact rather than fixing
         # anything): slot 0's output must be identical regardless of its
@@ -85,7 +85,7 @@ def main():
         input_names=["images"], output_names=["logits"],
         dynamic_axes={"images": {0: "batch"}, "logits": {0: "batch"}},
         opset_version=17,
-        dynamo=False,  # legacy exporter - matches export_lprnet.py's choice
+        dynamo=False,  # legacy exporter (torch 2.12's dynamo default needs onnxscript)
     )
     print(f"ONNX written: {OUT} (input Nx3x224x224, output Nx1000, "
           f"dynamic batch)")

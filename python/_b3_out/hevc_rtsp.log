@@ -1,0 +1,20 @@
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.6.3
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+--- HEVC/e2e (cudaVideoCodec_HEVC first-ever exercise)
+✓ Engine loaded: models/yolov8n_b1-16_fp16_sm86.engine (max batch 16)
+✓ Head: 80 classes, 8400 anchors
+  results=600 dets_total=1210 first_boxes=[(16.0, 345.4, 617.1, 366.5, 0.857, 0), (16.0, 345.4, 617.1, 366.5, 0.857, 0), (12.5, 344.2, 623.4, 368.1, 0.863, 0)]
+HEVC verdict: results=600 dets=1210 PASS

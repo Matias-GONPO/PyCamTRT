@@ -176,8 +176,16 @@ void LaunchArgmaxBatched(const float* d_logits, int batch, int classes,
 //              into the kept-list buffers GpuLoop already owns (max_dets
 //              300 <= kMaxNmsCandidates 1024 - see pipeline.cpp's Setup()
 //              shape check, which enforces this).
+//   norm_cxcywh/net_w/net_h: rtdetr variant (report 11 T3.2) - when
+//              norm_cxcywh is true the row's box columns are NORMALIZED
+//              (0-1) cx,cy,w,h (ultralytics RT-DETR export layout) and are
+//              scaled by net_w/net_h + converted to corners before the
+//              shared un-letterbox affine; false = yolo-e2e's native
+//              pixel-space x1,y1,x2,y2, passed through bit-identically
+//              (pass 640,640 - ignored).
 // Async on `stream` - caller synchronizes before reading d_out/d_counts.
 void LaunchYoloE2EBatched(const float* d_raw, int batch, int max_dets,
                           const PostprocImageParams* d_params,
-                          float score_thresh, GpuDetection* d_out,
-                          int* d_counts, cudaStream_t stream);
+                          float score_thresh, bool norm_cxcywh, float net_w,
+                          float net_h, GpuDetection* d_out, int* d_counts,
+                          cudaStream_t stream);

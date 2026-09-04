@@ -5,7 +5,7 @@ result, no raw tensor in sight.
 
 CONTRACT (read this before copying the pattern elsewhere - see the package
 docstring's "Custom postprocessing - two tiers" section, and
-manual/ADDING_A_FAMILY.md for the OTHER tier):
+docs/ADDING_A_FAMILY.md for the OTHER tier):
   - This code runs on the CONSUMER THREAD, i.e. inside your `for r in
     pipe:` loop, on the COMPACT per-frame result the C++ data plane has
     already produced - tens of boxes at most, never the raw
@@ -21,7 +21,7 @@ manual/ADDING_A_FAMILY.md for the OTHER tier):
   - When NOT to do this: anything that reads the RAW OUTPUT TENSOR (a
     custom decode of a model's raw head - per-anchor/per-pixel work, e.g.
     a segmentation mask or a bespoke box-decode) belongs in a COMPILED GPU
-    sibling-launcher family instead (see manual/ADDING_A_FAMILY.md), never
+    sibling-launcher family instead (see docs/ADDING_A_FAMILY.md), never
     a Python callback on the per-frame path. The litmus test: does the
     code read *survivors* (a short compact list, this file) or the *raw
     tensor* (megabytes, every anchor, every frame)? Survivors -> Python is
@@ -59,8 +59,7 @@ attached Zone's occupancy starts False - see ZONE_ENTER below. Point
 
 Run it (from the repo root, inside the tensorrt-dev docker container, with
 the Python-dev conda env providing the interpreter - see
-examples/read_plates.py's docstring for the full canonical incantation, or
-CLAUDE.md):
+examples/read_plates.py's docstring for the full canonical incantation):
 
     docker run --rm --gpus all --network host \\
         -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \\

@@ -17,15 +17,14 @@
 # a genuine bug, not run-to-run frame jitter (which is all an RTSP source
 # could ever give us).
 #
-# PRE-EXISTING BUG WORKED AROUND HERE (found while building this test, see
-# the report - NOT part of the SAHI question, do not confuse the two):
-# feeding rtsp_infer_multi an MP4-container file directly is unreliable in
-# this environment - FFmpegDemuxer's avformat_find_stream_info() on an
-# moov-at-the-end .mp4 leaves the stream unable to yield more than a
-# handful of packets before every subsequent av_read_frame() call reports
-# a hard (but spurious) AVERROR_EOF, so the producer's reconnect loop spins
-# until its give-up timer fires and the run FAILS with 0 decoded frames -
-# reproducible on every retry, confirmed independent of SAHI/NvDecoder
+# HISTORICAL NOTE (the bug this worked around is FIXED - v0.2.0's AVBSF
+# path makes MP4 files first-class inputs; see CHANGELOG.md): this script
+# predates the fix and extracts a raw .h264 elementary stream before
+# running. Kept as-is deliberately - the raw-stream input is maximally
+# deterministic for a parity check, and changing a verification
+# instrument without need is against house rules. (Original symptom, for
+# the record: moov-at-end MP4 probing starved the demuxer into spurious
+# EOFs before the AVBSF/file-EOF rework.)
 # construction order via targeted instrumentation (see report). A RAW
 # H.264 elementary stream (no container, no seek/duration probing) does
 # NOT hit this: rtsp_infer_multi decodes it cleanly end to end. So this
@@ -60,7 +59,7 @@ fi
 
 T0=$(date +%s)
 
-echo "--- extracting raw H.264 elementary stream (sidesteps the mp4-probe bug, see script header) ---"
+echo "--- extracting raw H.264 elementary stream (historical determinism choice, see script header) ---"
 "$FFMPEG" -y -loglevel error -i "$MEDIA" -c copy -bsf:v h264_mp4toannexb -f h264 "$H264"
 if [ ! -s "$H264" ]; then
     echo "!! h264 extraction produced an empty/missing file" >&2

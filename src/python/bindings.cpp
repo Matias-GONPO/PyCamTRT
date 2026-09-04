@@ -57,13 +57,16 @@ PYBIND11_MODULE(_pycamtrt, m) {
     py::enum_<StepKind>(m, "StepKind")
         .value("Process", StepKind::Process)
         .value("Engine", StepKind::Engine)
-        .value("Postprocess", StepKind::Postprocess);
+        .value("Postprocess", StepKind::Postprocess)
+        .value("Select", StepKind::Select);
 
     py::enum_<Family>(m, "Family")
         .value("YoloDetect", Family::YoloDetect)
         .value("Ctc", Family::Ctc)
         .value("Argmax", Family::Argmax)
-        .value("YoloE2E", Family::YoloE2E);
+        .value("YoloE2E", Family::YoloE2E)
+        .value("Embedding", Family::Embedding)
+        .value("RtDetr", Family::RtDetr);
 
     py::enum_<Backpressure>(m, "Backpressure")
         .value("Block", Backpressure::Block)
@@ -83,6 +86,13 @@ PYBIND11_MODULE(_pycamtrt, m) {
         .def_readwrite("family", &StepDesc::family)
         .def_readwrite("score_thresh", &StepDesc::score_thresh)
         .def_readwrite("iou_thresh", &StepDesc::iou_thresh)
+        .def_readwrite("sel_classes", &StepDesc::sel_classes)
+        .def_readwrite("sel_min_score", &StepDesc::sel_min_score)
+        .def_readwrite("sel_min_size", &StepDesc::sel_min_size)
+        .def_readwrite("build_max_batch", &StepDesc::build_max_batch)
+        .def_readwrite("build_fp16", &StepDesc::build_fp16)
+        .def_readwrite("build_h", &StepDesc::build_h)
+        .def_readwrite("build_w", &StepDesc::build_w)
         // M1a/M3a: Engine-step input normalization/color (see graph.h's
         // WHY-comment) - NAN per element (norm_offset/norm_scale, each a
         // 3-element PER-CHANNEL array - StepDesc's own field default) / -1
@@ -159,6 +169,10 @@ PYBIND11_MODULE(_pycamtrt, m) {
         // extract_clip() - 0 opts a pipeline out of that ring entirely.
         .def_readwrite("sinks", &PipelineConfig::sinks)
         .def_readwrite("ring_seconds", &PipelineConfig::ring_seconds)
+        // CP1: per-child CUDA-stream cascade parallelism is the DEFAULT
+        // (false); true is the A/B escape hatch (today's sequential path,
+        // unchanged) - see graph.h's WHY-comment.
+        .def_readwrite("cascade_serial", &PipelineConfig::cascade_serial)
         // cfg.log: None (default, unset) => C++ side falls back to
         // fprintf(stderr, ...) since PipelineConfig::log is a nullptr
         // std::function by default. A Python callable is wrapped so the
@@ -219,10 +233,20 @@ PYBIND11_MODULE(_pycamtrt, m) {
         .def_readonly("texts", &ChildOutput::texts)
         .def_readonly("labels", &ChildOutput::labels)
         .def_readonly("label_scores", &ChildOutput::label_scores)
+        .def_readonly("vectors", &ChildOutput::vectors)
+        // CP1: this child's own GPU-stream time for the batch this result
+        // rode in - RAW meaning, see result.h's WHY-comment (enqueue->done
+        // on whatever stream this child actually ran on; under the default
+        // parallel mode that's its own dedicated stream, under
+        // cfg.cascade_serial=True it's the shared main stream - the two
+        // are not directly comparable in isolation, but their MEANS across
+        // a run are exactly what an A/B comparison wants).
+        .def_readonly("ms_gpu", &ChildOutput::ms_gpu)
         .def("__repr__", [](const ChildOutput& c) {
             return "<ChildOutput layer=" + std::to_string(c.layer) +
                    " texts=" + std::to_string(c.texts.size()) +
-                   " labels=" + std::to_string(c.labels.size()) + ">";
+                   " labels=" + std::to_string(c.labels.size()) +
+                   " ms_gpu=" + std::to_string(c.ms_gpu) + ">";
         });
 
     py::class_<FrameResult>(m, "FrameResult")

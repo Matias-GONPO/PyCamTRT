@@ -1,0 +1,38 @@
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.6.3
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+✓ Engine loaded: models/yolov8n_plates_b1-16_fp16_sm86.engine (max batch 16)
+warning: 32 streams > engine max batch 16 - batches chunk at 16; fine at reduced inference rates, caps throughput at every-frame full rate
+✓ Head: 1 classes, 8400 anchors
+✓ OCR (ctc) child 'read': models/lprnet_b1-32_fp32_sm86.engine (max batch 32, in 94x24, 68 classes x 18 steps)
+[h264 @ 0x70d1f4006980] Missing reference picture, default is 0
+[h264 @ 0x70d1f4006980] decode_slice_header error
+[h264 @ 0x70d1f4006980] Missing reference picture, default is 0
+[h264 @ 0x70d1f4006980] decode_slice_header error
+[h264 @ 0x70d1f4006980] Missing reference picture, default is 0
+[h264 @ 0x70d1f4006980] decode_slice_header error
+[h264 @ 0x70d1f4006980] Missing reference picture, default is 0
+[h264 @ 0x70d1f4006980] decode_slice_header error
+[h264 @ 0x70d1f4006980] Missing reference picture, default is 0
+[h264 @ 0x70d1f4006980] decode_slice_header error
+[h264 @ 0x70d1f4006980] Missing reference picture, default is 0
+[h264 @ 0x70d1f4006980] decode_slice_header error
+[h264 @ 0x70d1f4006980] Missing reference picture, default is 0
+[h264 @ 0x70d1f4006980] decode_slice_header error
+[h264 @ 0x70d1f4006980] Missing reference picture, default is 0
+[h264 @ 0x70d1f4006980] decode_slice_header error
+PHASE1 done: results=8649 dropped=25901
+DROPTEST results=32608 stale_results=0 dropped_p1=25901 dropped_new_in_p2=0
+DROPTEST GATES: {'evictions_under_overload': 'PASS', 'no_stale_delivery': 'PASS', 'recovery_drops_stop': 'PASS', 'clean_stop': 'PASS'}

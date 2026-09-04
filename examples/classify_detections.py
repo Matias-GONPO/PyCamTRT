@@ -34,8 +34,7 @@ torch model.
 
 Run it (from the repo root, inside the tensorrt-dev docker container, with
 the Python-dev conda env providing the interpreter - see
-examples/read_plates.py's docstring for the full canonical incantation, or
-CLAUDE.md):
+examples/read_plates.py's docstring for the full canonical incantation):
 
     docker run --rm --gpus all --network host \\
         -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \\
@@ -55,7 +54,7 @@ The RTSP sources come from tools/stream_farm/farm.sh; plate-shaped content
 
 Requires models/mobilenet_v3s_b1-32_fp16_sm86.engine (build via trtexec from the
 committed models/mobilenet_v3s_dynamic.onnx - see python/export_classifier.py's
-docstring and CLAUDE.md's canonical trtexec invocation).
+docstring and BUILD.md's trtexec appendix (or just point Engine() at the .onnx)).
 """
 import sys
 from collections import Counter
@@ -79,7 +78,7 @@ MAX_FRAMES = 600
 # alongside the pretrained weights) - purely a print-time convenience in
 # this CONTROL-PLANE script; falls back to bare numeric indices if
 # torchvision isn't importable. Never touches the per-frame path (see
-# CLAUDE.md: "Python = control plane, C++ = data plane").
+# the house rule: "Python = control plane, C++ = data plane").
 def _load_imagenet_categories():
     try:
         import torchvision

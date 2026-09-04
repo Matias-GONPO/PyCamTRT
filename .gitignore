@@ -4,7 +4,7 @@ __pycache__/
 *.pyc
 
 # TensorRT engines are per-GPU, per-TRT-version artifacts - built locally
-# from the committed .onnx exports (see README "Models"). Never committed.
+# from the committed .onnx exports (see models/README.md). Never committed.
 *.engine
 
 # NVIDIA Video Codec SDK: its license forbids redistribution. Download it
@@ -18,3 +18,33 @@ tools/stream_farm/media/
 tools/stream_farm/run/
 tools/stream_farm/*.crt
 tools/stream_farm/*.key
+
+# Campaign/test-run artifacts from the python harnesses - never committed
+python/*.log
+python/_t*_*.csv
+python/_t*_*.txt
+python/*.ndjson
+_b16_events.ndjson
+# LibreOffice lock files
+.~lock.*#
+# Benchmark raw results (archived per-campaign into Reports; the folder
+# itself ships empty)
+bench/results/
+bench/deepstream/run_plate/
+bench/deepstream/configs/app_*.txt
+bench/.diyenv/
+# parsers ship as source + Makefile; the .so is a container-built artifact
+bench/deepstream/parsers/*.so
+python/_routing_bench.csv
+
+# Models
+yolov8n_416_dynamic.onnx
+yolov8n_1280_dynamic.onnx
+rtdetr_l_dynamic.onnx
+# ultralytics-derived exports: untracked via `git rm --cached` (AGPL heritage,
+# see THIRD_PARTY.md) - ignored so `git add .` can't re-add them
+models/yolov8n.onnx
+models/yolov8n_dynamic.onnx
+models/yolo26n.onnx
+models/yolov8n_plates.onnx
+models/yolov8n_plates_dynamic.onnx

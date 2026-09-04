@@ -2,6 +2,11 @@
 ## The Library
 ### The CORDERO Book — Part 3
 
+> NOTE (v0.2.0): this book is the historical narrative through the
+> v0.1.0 extraction. Features added after it (Select routing, the
+> rtdetr/embedding families, engine auto-build, engine-derived
+> detector dims, file inputs) are chronicled in CHANGELOG.md.
+
 ---
 
 **Part 3 of the Zero-Copy Vision series.** Part 1 built and verified the silicon-up

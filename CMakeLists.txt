@@ -1,8 +1,27 @@
 cmake_minimum_required(VERSION 3.18)
-project(SimpleInference)
+
+# BUILD TYPE DEFAULT (root-caused the hard way - see FINDINGS "the
+# unoptimized-release incident", 2026-09-02): CMake's empty default build
+# type compiles with NO optimization, and nothing in this project ever set
+# one - the CORDERO dev checkout only got -O3 because a years-old manual
+# -DCMAKE_BUILD_TYPE=Release was riding in its build cache. An empty-type
+# build is functionally correct but up to ~45x slower on sparse-cadence
+# cells. Default to Release; -DCMAKE_BUILD_TYPE=Debug still overrides.
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+message(STATUS "CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
+
+# GPU arch default - must be set BEFORE enable_language(CUDA) probes and
+# caches its own default, or the guard can never fire on a fresh configure.
+# Override for your GPU: cmake -DCMAKE_CUDA_ARCHITECTURES=89 .. (BUILD.md).
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
+    set(CMAKE_CUDA_ARCHITECTURES 86)
+endif()
+
+project(PyCamTRT VERSION 0.2.0)
 
 enable_language(CUDA)
-set(CMAKE_CUDA_ARCHITECTURES 86)  # RTX 3060 Ti (Ampere)
 
 find_package(CUDA REQUIRED)
 find_package(OpenCV REQUIRED)
@@ -18,11 +37,20 @@ find_library(TENSORRT_LIB nvinfer
           /usr/local/lib
           /usr/lib)
 
+# R3 engine auto-build: the ONNX parser ships with every TensorRT install
+# alongside nvinfer - linked so TrtEngine can build+cache an .engine from
+# a .onnx path directly (see src/EngineBuilder.h).
+find_library(NVONNXPARSER_LIB nvonnxparser
+    HINTS /usr/lib/x86_64-linux-gnu 
+          /usr/local/lib
+          /usr/lib)
+
 # Print what we found for debugging
 message(STATUS "CUDA_LIBRARIES: ${CUDA_LIBRARIES}")
 message(STATUS "CUDA_INCLUDE_DIRS: ${CUDA_INCLUDE_DIRS}")
 message(STATUS "TENSORRT_INCLUDE_DIR: ${TENSORRT_INCLUDE_DIR}")
 message(STATUS "TENSORRT_LIB: ${TENSORRT_LIB}")
+message(STATUS "NVONNXPARSER_LIB: ${NVONNXPARSER_LIB}")
 
 # (The CORDERO research repo's Step-1 `simple_inference` relic is not part
 # of the library release - the earliest checkpoint here is rtsp_decode.)
@@ -38,8 +66,8 @@ target_link_libraries(demuxer_test ${FFMPEG_LIBRARIES})
 target_link_directories(demuxer_test PRIVATE ${FFMPEG_LIBRARY_DIRS})
 
 # NVDEC GPU decode needs the Video Codec SDK headers/libs, which require a
-# manual download (NVIDIA account) - see third_party/README or
-# RTSP_STREAM_HANDOFF.md. Only builds rtsp_decode once it's in place, so its
+# manual download (NVIDIA account) - see third_party/README and
+# BUILD.md. Only builds rtsp_decode once it's in place, so its
 # absence doesn't break the rest of the project.
 set(VIDEO_CODEC_SDK_DIR "${CMAKE_SOURCE_DIR}/third_party/Video_Codec_SDK")
 
@@ -112,7 +140,7 @@ if(EXISTS "${VIDEO_CODEC_SDK_DIR}/Interface")
     )
 
     target_link_libraries(rtsp_infer
-        ${TENSORRT_LIB}
+        ${TENSORRT_LIB} ${NVONNXPARSER_LIB}
         ${NVCUVID_LIB}
         ${CUDA_DRIVER_LIB}
         ${FFMPEG_LIBRARIES}
@@ -147,7 +175,7 @@ if(EXISTS "${VIDEO_CODEC_SDK_DIR}/Interface")
     )
 
     target_link_libraries(cordero PUBLIC
-        ${TENSORRT_LIB}
+        ${TENSORRT_LIB} ${NVONNXPARSER_LIB}
         ${NVCUVID_LIB}
         ${CUDA_DRIVER_LIB}
         ${FFMPEG_LIBRARIES}
@@ -232,7 +260,7 @@ target_include_directories(postprocess_test PRIVATE
 )
 
 target_link_libraries(postprocess_test
-    ${TENSORRT_LIB}
+    ${TENSORRT_LIB} ${NVONNXPARSER_LIB}
     ${CUDA_LIBRARIES}
     ${OpenCV_LIBS}
 )
@@ -276,12 +304,12 @@ target_include_directories(engine_batch_test PRIVATE
 )
 
 target_link_libraries(engine_batch_test
-    ${TENSORRT_LIB}
+    ${TENSORRT_LIB} ${NVONNXPARSER_LIB}
     ${CUDA_LIBRARIES}
 )
 
 # Cascade checkpoint: LPRNet engine vs PyTorch reference dump + greedy CTC
-# decode parity. TensorRT + CUDA only; reference bins from export_lprnet.py.
+# decode parity. TensorRT + CUDA only; reference bins exported alongside the LPRNet onnx (CORDERO repo).
 add_executable(lprnet_test src/lprnet_test.cpp)
 
 target_include_directories(lprnet_test PRIVATE
@@ -291,7 +319,7 @@ target_include_directories(lprnet_test PRIVATE
 )
 
 target_link_libraries(lprnet_test
-    ${TENSORRT_LIB}
+    ${TENSORRT_LIB} ${NVONNXPARSER_LIB}
     ${CUDA_LIBRARIES}
 )
 
@@ -311,7 +339,7 @@ target_include_directories(compare_fp16 PRIVATE
 )
 
 target_link_libraries(compare_fp16
-    ${TENSORRT_LIB}
+    ${TENSORRT_LIB} ${NVONNXPARSER_LIB}
     ${CUDA_LIBRARIES}
     ${OpenCV_LIBS}
 )

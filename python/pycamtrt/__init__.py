@@ -174,7 +174,7 @@ See ``pycamtrt._capacity``'s module docstring for exactly how
 constants are measured on ONE GPU, RTX 3060 Ti / sm_86).
 
 Custom postprocessing - two tiers (M3b), split by TENSOR SIZE, not by
-preference (see ``Reports/PART2_DESIGN_AND_WORKPLAN.txt`` §2.3):
+preference (a settled CORDERO design rule):
 
   1. **Python on COMPACT results (this tier, legal and encouraged).** A
      ``Result``'s ``detections``/``texts``/``labels`` are already tiny
@@ -194,23 +194,26 @@ preference (see ``Reports/PART2_DESIGN_AND_WORKPLAN.txt`` §2.3):
      caller's stream"). ``yolo``/``yolo-e2e``/``ctc``/``argmax`` (see
      ``_FAMILIES``) are the built-in examples; adding your own is a
      recompile, not a plugin -
-     see ``manual/ADDING_A_FAMILY.md`` for the full walkthrough (using
+     see ``docs/ADDING_A_FAMILY.md`` for the full walkthrough (using
      ``argmax`` as the worked, already-shipped template).
 
 The litmus test is always: does your code read *survivors* (short,
 compact, post-decode) or the *raw tensor* (megabytes, every anchor, every
 frame)? Survivors -> tier 1, Python, here. Raw tensor -> tier 2, compiled,
-``manual/ADDING_A_FAMILY.md``.
+``docs/ADDING_A_FAMILY.md``.
 """
 
 from __future__ import annotations
 
 import weakref
-from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import (Callable, Dict, Iterable, List, Optional, Sequence,
+                    Tuple, Union)
 
 import _pycamtrt as _c
 
 from ._capacity import Recommendation, recommend
+
+__version__ = "0.2.0"
 
 __all__ = [
     "Streams",
@@ -218,6 +221,7 @@ __all__ = [
     "Process",
     "Engine",
     "Postprocess",
+    "Select",
     "Layer",
     "Sink",
     "Pipeline",
@@ -244,11 +248,23 @@ PollStatus = _c.Pipeline.PollStatus
 # family; `score` is honored, `iou` is ignored (no NMS stage), and SAHI is
 # rejected on a layer using it (named RuntimeError at Pipeline
 # construction - see pipeline.cpp's Validate()).
+# "embedding" (T3.1/report 11) is the raw pass-through cascade-child
+# family for penultimate-feature / re-ID heads: the child engine's 2D
+# [N,D] output rows are handed back UNDECODED, one [D] float list per
+# detection, via Result.outputs[<layer>] / ChildOutput.vectors - there is
+# no kernel, the pass-through IS the decode. `score`/`iou` are ignored.
+# "rtdetr" (T3.2/report 11) is yolo-e2e's twin for ultralytics RT-DETR
+# exports: the SAME NMS-free [N,300,6] head contract, but box columns are
+# normalized cx,cy,w,h (their pixel scaling lives in ultralytics' python
+# postprocess, so it lives in our kernel instead) - a LAYER-0 detector
+# family; like yolo-e2e, `score` honored, `iou` ignored, SAHI rejected.
 _FAMILIES = {
     "yolo": _c.Family.YoloDetect,
     "ctc": _c.Family.Ctc,
     "argmax": _c.Family.Argmax,
     "yolo-e2e": _c.Family.YoloE2E,
+    "embedding": _c.Family.Embedding,
+    "rtdetr": _c.Family.RtDetr,
 }
 
 _DECODE_MODES = ("all", "key")
@@ -298,7 +314,7 @@ def _apply_sahi(c_layer: "_c.LayerDesc", sahi: dict) -> None:
     if "serial" in sahi:
         c_layer.sahi_serial = sahi["serial"]
 
-StepInput = Union["Streams", "Process", "Engine", "Postprocess"]
+StepInput = Union["Streams", "Process", "Engine", "Postprocess", "Select"]
 
 
 class Stream:
@@ -374,6 +390,84 @@ class Process(_Step):
     kind = _c.StepKind.Process
 
 
+class Select(_Step):
+    """A declarative DETECTION FILTER - the routing node (R1, v0.2.0).
+
+    Sits between the detector layer's ``Postprocess`` and a cascade
+    child's ``Engine``: only detections passing EVERY active criterion
+    have their crops sent to that child. Model-agnostic by construction:
+    criteria are comparisons over the detection struct (integer class id,
+    score, crop size) - the library routes on ints, never on class NAMES
+    ("person" is a model's opinion, not the library's; cls 0 means person
+    only if YOUR detector says so).
+
+    ::
+
+        person = pycamtrt.Layer("person")
+        sel = person.add(pycamtrt.Select(dets, classes={0}, min_size=32))
+        eng = person.add(pycamtrt.Engine(sel, "models/resnet18emb...", ...))
+        person.add(pycamtrt.Postprocess(eng, family="embedding"))
+
+    Contracts:
+
+    - A child layer is ``[Engine, Postprocess]`` (unrouted, unchanged) or
+      ``[Select, Engine, Postprocess]``. The Select's input must be the
+      DETECTOR layer's Postprocess step; a Select fed from another
+      child's output is the depth-3 case and raises the named chained-
+      cascade error.
+    - Results stay ALIGNED: ``outputs[layer][i]`` still describes
+      ``detections[i]`` - a routed-away detection simply gets that
+      child's empty entry ("" / no label pair / empty vector). Consumers
+      keep one indexing rule whether or not routing is on.
+    - Sharing is legal: another child layer's ``Engine`` may take this
+      same Select handle as its input (that layer is then the 2-step
+      shape, its filter defined elsewhere).
+    - Routing strictly REDUCES work: fewer crops per child, smaller child
+      batches.
+    - Criteria must stay compilable (host-side comparisons in the crop
+      path). Anything needing pixels or arbitrary Python belongs to the
+      Python-on-results tier (see ``examples/zone_filter.py``), not here.
+
+    Args:
+        input: the detector layer's ``Postprocess`` step.
+        classes: iterable of ints - detection class ids to pass; ``None``
+            (default) = any class.
+        min_score: pass only detections with ``score >= min_score``;
+            ``None`` = any score.
+        min_size: pass only detections whose crop is at least this many
+            SOURCE pixels on its smaller side (min(w, h), measured on the
+            clamped crop rectangle the child would actually see);
+            ``None`` = any size. A ``Select()`` with no criteria passes
+            everything (useful as an A/B control).
+    """
+
+    kind = _c.StepKind.Select
+
+    def __init__(self, input: StepInput,
+                 classes: Optional[Iterable[int]] = None,
+                 min_score: Optional[float] = None,
+                 min_size: Optional[float] = None):
+        super().__init__(input)
+        if classes is not None:
+            cls_list = sorted(set(classes))
+            bad = [c for c in cls_list
+                   if not isinstance(c, int) or isinstance(c, bool)]
+            if bad or not cls_list:
+                raise ValueError(
+                    f"classes must be a non-empty iterable of ints (class "
+                    f"ids as YOUR detector emits them), got {classes!r}")
+            self.classes: Optional[List[int]] = cls_list
+        else:
+            self.classes = None
+        for name, v in (("min_score", min_score), ("min_size", min_size)):
+            if v is not None and (not isinstance(v, (int, float))
+                                  or isinstance(v, bool) or v < 0):
+                raise ValueError(f"{name} must be a non-negative number or "
+                                 f"None, got {v!r}")
+        self.min_score = min_score
+        self.min_size = min_size
+
+
 class Engine(_Step):
     """Runs a TensorRT engine on its input.
 
@@ -428,7 +522,10 @@ class Engine(_Step):
 
     def __init__(self, input: StepInput, engine_path: str,
                  norm: Optional[tuple] = None,
-                 color: Optional[str] = None):
+                 color: Optional[str] = None,
+                 max_batch: int = 16,
+                 fp16: bool = True,
+                 shape: Optional[tuple] = None):
         super().__init__(input)
         self.engine_path = engine_path
         self.norm = self._parse_norm(norm)
@@ -436,6 +533,29 @@ class Engine(_Step):
             raise ValueError(
                 f"color must be 'rgb', 'bgr', or None, got {color!r}")
         self.color = color
+        # R3 auto-build knobs - meaningful only when engine_path is a
+        # .onnx: dynamic-batch profile max, precision, and explicit (H, W)
+        # for exports whose spatial dims are symbolic (ultralytics
+        # dynamic=True); a plain .engine path ignores all three.
+        if not isinstance(max_batch, int) or isinstance(max_batch, bool) \
+                or max_batch < 1:
+            raise ValueError(f"max_batch must be a positive int, got "
+                             f"{max_batch!r}")
+        if shape is not None:
+            try:
+                h, w = shape
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"shape must be an (H, W) tuple or None, got "
+                    f"{shape!r}") from None
+            if not all(isinstance(v, int) and not isinstance(v, bool)
+                       and v >= 32 for v in (h, w)):
+                raise ValueError(
+                    f"shape must be an (H, W) tuple of ints >= 32, got "
+                    f"{shape!r}")
+        self.max_batch = max_batch
+        self.fp16 = bool(fp16)
+        self.shape = tuple(shape) if shape is not None else None
 
     @staticmethod
     def _parse_norm(norm: Optional[tuple]) -> Optional[Tuple[Tuple[float, float, float],
@@ -728,10 +848,17 @@ class Result:
             # replaces the single-child `l1_argmax` bool this generalizes.
             for i, name in enumerate(layer_names[1:]):
                 child = r.children[i] if i < len(r.children) else None
-                if i < len(child_families) and child_families[i] == "argmax":
+                fam = child_families[i] if i < len(child_families) else "ctc"
+                if fam == "argmax":
                     outputs[name] = (
                         list(zip(child.labels, child.label_scores))
                         if child is not None else [])
+                elif fam == "embedding":
+                    # T3.1: one [D] float list per detection, undecoded
+                    # (ChildOutput.vectors) - consumers cosine/L2/cluster
+                    # these however they like; np.asarray(v) is zero-fuss.
+                    outputs[name] = (list(child.vectors)
+                                     if child is not None else [])
                 else:
                     outputs[name] = list(child.texts) if child is not None else []
         self.outputs = outputs
@@ -860,6 +987,15 @@ class Pipeline:
             gets decoded/inferred. Default 10 (seconds); ``0`` opts a
             pipeline out of the ring entirely (no relay/clip support, no
             per-packet copy cost).
+        cascade_serial: ``PipelineConfig.cascade_serial`` (CP1) - ``False``
+            (default) runs every cascade child's crop/infer/decode on its
+            OWN CUDA stream, concurrently, with no synchronization between
+            siblings. ``True`` is the A/B escape hatch: today's pre-CP1
+            sequential path (every child fully processed, in turn, on the
+            single shared GPU stream) - unchanged, kept for regression
+            isolation and side-by-side timing comparison (see each child's
+            ``ChildOutput.ms_gpu`` in ``outputs``/``children``). No effect
+            on a pipeline with no cascade children.
 
     Usage: iterate the pipeline directly (``for r in pipe:``) - iteration
     auto-starts if ``start()`` wasn't called yet - or use it as a context
@@ -883,6 +1019,7 @@ class Pipeline:
         ring_depth: int = 4,
         sinks: Sequence[Sink] = (),
         ring_seconds: int = 10,
+        cascade_serial: bool = False,
     ):
         if decode not in _DECODE_MODES:
             raise ValueError(f"decode must be one of {_DECODE_MODES}, got {decode!r}")
@@ -909,8 +1046,8 @@ class Pipeline:
         for layer in layers[1:]:
             fam = "ctc"
             if layer.steps and isinstance(layer.steps[-1], Postprocess) and \
-                    layer.steps[-1].family == "argmax":
-                fam = "argmax"
+                    layer.steps[-1].family in ("argmax", "embedding"):
+                fam = layer.steps[-1].family
             self._child_families.append(fam)
         cfg = _c.PipelineConfig()
         # skip None -> 0 (inherit cfg.skip), else the override as-is;
@@ -934,6 +1071,7 @@ class Pipeline:
         cfg.hold_frames = hold_frames
         cfg.ring_depth = ring_depth
         cfg.ring_seconds = ring_seconds
+        cfg.cascade_serial = cascade_serial
         cfg.log = log
 
         # object identity -> compiled step index (Streams maps to -1, the
@@ -973,10 +1111,23 @@ class Pipeline:
                         c_step.norm_offset, c_step.norm_scale = step.norm
                     if step.color is not None:
                         c_step.color = 1 if step.color == "rgb" else 0
+                    c_step.build_max_batch = step.max_batch
+                    c_step.build_fp16 = step.fp16
+                    if step.shape is not None:
+                        c_step.build_h, c_step.build_w = step.shape
                 elif isinstance(step, Postprocess):
                     c_step.family = _FAMILIES[step.family]
                     c_step.score_thresh = step.score
                     c_step.iou_thresh = step.iou
+                elif isinstance(step, Select):
+                    # R1 routing: empty/0 = criterion off (see graph.h's
+                    # StepDesc sel_* WHY-comment).
+                    if step.classes is not None:
+                        c_step.sel_classes = step.classes
+                    if step.min_score is not None:
+                        c_step.sel_min_score = float(step.min_score)
+                    if step.min_size is not None:
+                        c_step.sel_min_size = float(step.min_size)
                 new_idx = len(c_steps)
                 c_steps.append(c_step)
                 index_of[id(step)] = new_idx

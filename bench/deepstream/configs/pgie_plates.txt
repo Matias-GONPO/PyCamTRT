@@ -1,0 +1,27 @@
+# PGIE: yolov8n plate detector (nc=1), same ONNX as CORDERO's stage 1.
+# Parity targets: fp32, score 0.4, NMS IOU 0.45, centered letterbox.
+# Known deviation (recorded): nvinfer pads letterbox with black; CORDERO
+# pads YOLO-conventional 114 gray. Not configurable in DS — noted in README.
+[property]
+gpu-id=0
+onnx-file=/workspace/models/yolov8n_plates_dynamic.onnx
+model-engine-file=/workspace/models/yolov8n_plates_dynamic.onnx_b16_gpu0_fp32.engine
+batch-size=16
+network-mode=0
+network-type=0
+num-detected-classes=1
+gie-unique-id=1
+labelfile-path=/workspace/bench/deepstream/configs/labels_plates.txt
+infer-dims=3;640;640
+maintain-aspect-ratio=1
+symmetric-padding=1
+net-scale-factor=0.00392156862745098
+model-color-format=0
+cluster-mode=2
+parse-bbox-func-name=NvDsInferParseYoloV8
+custom-lib-path=/workspace/bench/deepstream/parsers/libyolov8_parser.so
+
+[class-attrs-all]
+pre-cluster-threshold=0.4
+nms-iou-threshold=0.45
+topk=300

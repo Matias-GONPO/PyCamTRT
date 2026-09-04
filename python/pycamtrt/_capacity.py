@@ -50,7 +50,7 @@ Sources (all under ``Reports/Atlas/`` in the repo this module ships with):
     model" (baseline gpu_ms intercept) and "NVDEC utilization" (peak
     decoded/s) sections, one per {720p, 1080p, 1440p, 4k}.
   - ``SAHI Night/SAHI_NIGHT_SUMMARY.md`` - the decode=key (offered-rate-
-    throttled) SAHI cost model, `2.66 + 0.488*T`.
+    throttled) SAHI cost model, `3.185 + 0.482*T` (v2 re-fit).
   - ``SAHI Refresh/SAHI_REFRESH_SUMMARY.md`` - the decode=all pooled/serial
     SAHI cost models at N=8, and the finding that SAHI Night's model does
     NOT generalize to decode=all (different regime, different fixed
@@ -85,10 +85,14 @@ _RESOLUTION_PX: Dict[str, Tuple[int, int]] = {
 # (`gpu_ms ~= a + b*(N*inf_rate)`), from
 # Reports/Atlas/Atlas <res>/ATLAS_<res>_analysis.txt's "## Capacity model"
 # section:
-#   720p:  "gpu_ms ~= 1.98 + 0.00233 * (N*inf_rate)"
-#   1080p: "gpu_ms ~= 2.00 + -0.00073 * (N*inf_rate)"
-#   1440p: "gpu_ms ~= 1.87 + 0.01150 * (N*inf_rate)"
-#   4k:    "gpu_ms ~= 2.01 + -0.00055 * (N*inf_rate)"
+# v2 (2026-09, "Atlas <res> v2" series - measured on the v0.2.0 Release
+# binary; drift tables in each folder, content md5-pinned per run):
+#   720p:  "gpu_ms ~= 1.94 + 0.00445 * (N*inf_rate)"  [RMS 0.42]
+#   1080p: "gpu_ms ~= 2.05 + -0.00074 * (N*inf_rate)" [RMS 0.17]
+#   1440p: "gpu_ms ~= 2.06 + -0.00137 * (N*inf_rate)" [RMS 0.17]
+#   4k:    "gpu_ms ~= 2.09 + -0.00363 * (N*inf_rate)" [RMS 0.19]
+# (v1, July, for the record: 1.98 / 2.00 / 1.87 / 2.01 - v2 supersedes;
+# 1440p's v1 1.87 was the series outlier, see its drift table.)
 # Only the intercept is used: all four land within +-0.07 ms of each other,
 # confirming the Atlas README's own claim ("inference cost is
 # resolution-invariant - everything letterboxes to 640x640"). The slope
@@ -98,10 +102,10 @@ _RESOLUTION_PX: Dict[str, Tuple[int, int]] = {
 # aggregate rates (hundreds of inf/s) it would occasionally predict a
 # NEGATIVE ms/frame, which is not a real limitation to encode as precision.
 _BASELINE_MS_PER_FRAME: Dict[str, float] = {
-    "720p": 1.98,
-    "1080p": 2.00,
-    "1440p": 1.87,
-    "4k": 2.01,
+    "720p": 1.94,
+    "1080p": 2.05,
+    "1440p": 2.06,
+    "4k": 2.09,
 }
 
 # SAHI per-frame GPU cost models: ms/frame = a + b*T, T = tile count
@@ -136,9 +140,12 @@ _BASELINE_MS_PER_FRAME: Dict[str, float] = {
 # steady-state approximation at/above roughly N=8. Noted in
 # Recommendation.notes whenever SAHI is in play.
 _SAHI_MODEL: Dict[str, Tuple[float, float]] = {
-    "pooled": (0.323, 0.498),
-    "serial": (1.094, 0.482),
-    "key": (2.66, 0.488),
+    # v2 re-fit (SAHI Refresh v2, 2026-09, R^2 >= 0.9999 all three;
+    # v1 for the record: pooled (0.323, 0.498), serial (1.094, 0.482),
+    # key (2.66, 0.488) - slopes drifted <2%).
+    "pooled": (0.305, 0.4963),
+    "serial": (0.998, 0.4900),
+    "key": (3.185, 0.4820),
 }
 
 # NVDEC ceiling: a pixel-rate SCALING from one measured point (Atlas 720p:
@@ -149,7 +156,13 @@ _SAHI_MODEL: Dict[str, Tuple[float, float]] = {
 # scale by this resolution's pixel count), not a per-resolution measured
 # fit. See the NOTE below for how this compares to the atlas's own
 # per-resolution numbers, which it does NOT match exactly.
-_NVDEC_BASE_STREAMS_720P_AT_30FPS = 50.0
+# v2 (2026-09): 1276 decoded/s at NVDEC 100% -> ~42.5 streams @ 30fps.
+# NOTE the four-point v2 series read (Atlas 4k v2/DRIFT_TABLE_4k.md):
+# 720p/1440p/4k peaks all came in ~15% below v1 while 1080p reproduced v1
+# EXACTLY - the "peak" is an observed operating point, not a hardware
+# constant; v2 values are self-consistent (one encoder, one day,
+# md5-pinned content) and conservative.
+_NVDEC_BASE_STREAMS_720P_AT_30FPS = 42.5
 _NVDEC_BASE_PIXEL_RATE = (
     _NVDEC_BASE_STREAMS_720P_AT_30FPS * 30.0 * (1280 * 720)
 )  # ~1.3824e9 px/s, treated as a fixed hardware decode budget.
@@ -160,20 +173,24 @@ _NVDEC_BASE_PIXEL_RATE = (
 # purely with pixel count on this hardware - fixed per-stream session
 # overhead matters too, so every resolution above 720p sustains MORE
 # decoded/s than pure area-scaling predicts:
-#   720p:  1499 decoded/s (the base point itself)
-#   1080p:  786 decoded/s (pixel-scaling predicts ~666 -> +18%)
-#   1440p:  472 decoded/s (pixel-scaling predicts ~375 -> +26%)
-#   4k:     219 decoded/s (pixel-scaling predicts ~167 -> +31%)
+# v2 (2026-09) measured peaks; pixel-scaling deltas recomputed from the
+# v2 base (1276 @720p):
+#   720p:  1276 decoded/s (the base point itself)
+#   1080p:  787 decoded/s (pixel-scaling predicts ~567 -> +39%)
+#   1440p:  400 decoded/s (pixel-scaling predicts ~319 -> +25%)
+#   4k:     186 decoded/s (pixel-scaling predicts ~142 -> +31%)
+# (v1 for the record: 1499/786/472/219 - see the v2 drift tables for the
+# -15%/exact/-15%/-15% series read.)
 # (all from each resolution's own ATLAS_<res>_analysis.txt "## NVDEC
 # utilization" section, decode=all peak row). The pixel-rate model is
 # therefore CONSERVATIVE (under-states real NVDEC headroom) by roughly
 # that margin at 1080p/1440p/4k - surfaced in Recommendation.notes
 # whenever NVDEC is the binding resource.
 _NVDEC_MEASURED_PEAK_DECODED_PER_S: Dict[str, float] = {
-    "720p": 1499.0,
-    "1080p": 786.0,
-    "1440p": 472.0,
-    "4k": 219.0,
+    "720p": 1276.0,
+    "1080p": 787.0,
+    "1440p": 400.0,
+    "4k": 186.0,
 }
 
 # Ratio above which a resource is reported as the/a "binding" one even

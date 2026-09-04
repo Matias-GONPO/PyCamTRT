@@ -18,7 +18,7 @@ decision test.
 ## 1. When you need this vs. when Python-on-results suffices
 
 CORDERO's custom-processing split is by **tensor size**, not by
-preference (see `Reports/PART2_DESIGN_AND_WORKPLAN.txt` §2.3, "Custom
+preference (a settled design rule from the CORDERO research repo, "Custom
 models -> custom postprocess — split by TENSOR SIZE"):
 
 - **Postprocess that reads the RAW OUTPUT TENSOR** — a model's raw head,
@@ -28,7 +28,7 @@ models -> custom postprocess — split by TENSOR SIZE"):
   covers. The reason isn't taste: that tensor is megabytes, every frame,
   and Python callback latency (plus the GIL) in that path is exactly the
   per-frame Python involvement CORDERO's whole architecture exists to
-  avoid (`CLAUDE.md`: "Python = control plane, C++ = data plane. No
+  avoid (the house rule: "Python = control plane, C++ = data plane. No
   Python in the per-frame path, ever.").
 - **Postprocess on the COMPACT RESULT** — the tens-of-survivors detection
   list, OCR strings, or classifier labels a `Postprocess` step has
@@ -199,7 +199,7 @@ that runs the per-batch OCR/classifier chunk loop), `const bool is_argmax
 
 ### (g) THE GATE — bit-exact CPU-reference checkpoint (non-negotiable)
 
-This is the house rule (`CLAUDE.md`: "Nothing is 'done' without its gate
+This is the house rule ("Nothing is 'done' without its gate
 green"; `HANDOFF.md` §5: "Verification as architecture. Every
 stage/feature ships with a checkpoint diffing it against a reference,
 bit-exact where possible."). No family is done without both of these:
@@ -289,3 +289,22 @@ family (`yolo-e2e`, M4a) surfaced these divergences — read this before adding 
   yolo layout. Either write a from-scratch CPU reference for your family or guard verify off
   for it *visibly* (M4a chose the documented no-op) — never leave it silently wrong.
 - **Free win**: section A's "valid families" error text updates itself from `_FAMILIES`.
+
+## §6 addendum (report 11 follow-up): the FMA contraction trap
+
+Learned adding the `rtdetr` variant (the first family whose decode multiplies before it
+adds): a mul-add shape like `cx - 0.5f * bw` in device code gets CONTRACTED into a fused
+multiply-add by nvcc (default `--fmad=true`), which rounds once, not twice — your CPU
+reference, compiled without FMA, rounds per-op and diverges in the last ulp. The existing
+families never hit this because their decode math is all `(a - b) / c` shapes, which have
+no mul-add to contract. Symptoms: the bit-exact checkpoint fails ONLY on geometries whose
+intermediate values are inexact (our non-square 802×543 image), with equal counts and
+near-equal values.
+
+Fix pattern (see `YoloE2EBatchedKernel`'s `norm_cxcywh` branch): write the device math with
+`__fmul_rn`/`__fadd_rn`/`__fsub_rn` intrinsics — CUDA guarantees these are never fused —
+so the kernel's op sequence is pinned to exactly what your CPU reference does. Do NOT
+"fix" it by making the CPU side use `std::fma` (compiler contraction choices are not a
+contract), and do NOT flip `--fmad=false` file-wide (it perturbs codegen for every other
+family's already-verified kernels). If your new family's decode multiplies, use the
+intrinsics from the start.

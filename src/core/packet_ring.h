@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <chrono>
 #include <mutex>
 #include <vector>
 
@@ -34,6 +35,21 @@ namespace cordero {
 struct RingPacket {
     std::vector<uint8_t> data;
     int64_t pts_us = -1;
+    // Wall-clock arrival stamp (steady_clock us at Push) - the ring's
+    // retention window trims on THIS, not pts (B3.5, campaign night 5):
+    // B-frame sources deliver packets in DECODE order, so pts oscillates
+    // per GOP (measured: 108 regressions in 299 packets on a real 4K
+    // phone recording), making a pts-window trim fuzzy on such sources
+    // and stall-prone on true PTS resets (reconnects, NVR relays).
+    // Arrival time is monotonic by construction, immune to B-frames, PTS
+    // resets, and NOPTS packets alike. pts_us stays for clip/relay
+    // anchoring semantics. (Honesty note: the RSS growth that triggered
+    // this hunt turned out to be glibc ARENA RETENTION under 4K-packet
+    // churn, not ring content - instrumented counters showed the ring
+    // bounded at ~40 MB throughout, and MALLOC_ARENA_MAX=1 flattened RSS.
+    // The arrival-trim ships because it is strictly more robust, not
+    // because the old trim was the measured leak.)
+    int64_t arrival_us = -1;
     bool keyframe = false;
 };
 
@@ -107,6 +123,9 @@ public:
         RingPacket p;
         p.data.assign(data, data + size);
         p.pts_us = pts_us;
+        p.arrival_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::steady_clock::now().time_since_epoch())
+                           .count();
         p.keyframe = keyframe;
         pkts_.push_back(std::move(p));
         TrimLocked();
@@ -153,15 +172,18 @@ private:
     // keyframe at-or-before the cutoff and erases everything before it, and
     // never touches anything past it regardless of how long the resulting
     // ring ends up being.
+    // Retention window on ARRIVAL time (see RingPacket::arrival_us's
+    // WHY-comment - pts is decode-order-hostile). arrival_us is stamped by
+    // Push itself, so it is always valid and strictly non-decreasing; the
+    // keyframe rule is unchanged: keep from the last keyframe at-or-before
+    // the cutoff so a snapshot always starts decodable.
     void TrimLocked() {
         if (pkts_.empty()) return;
-        const int64_t newest = pkts_.back().pts_us;
-        if (newest < 0) return;  // no usable timestamp - can't trim by duration
-        const int64_t cutoff = newest - (int64_t)ring_seconds_ * 1000000;
+        const int64_t cutoff =
+            pkts_.back().arrival_us - (int64_t)ring_seconds_ * 1000000;
         size_t keep_from = 0;
         for (size_t i = 0; i < pkts_.size(); i++) {
-            if (pkts_[i].pts_us < 0) continue;
-            if (pkts_[i].pts_us > cutoff) break;
+            if (pkts_[i].arrival_us > cutoff) break;
             if (pkts_[i].keyframe) keep_from = i;
         }
         if (keep_from > 0) pkts_.erase(pkts_.begin(), pkts_.begin() + keep_from);

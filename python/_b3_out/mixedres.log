@@ -1,0 +1,127 @@
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.6.3
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+✓ Engine loaded: models/yolov8n_plates_b1-16_fp16_sm86.engine (max batch 16)
+✓ Head: 1 classes, 8400 anchors
+✓ OCR (ctc) child 'read': models/lprnet_b1-32_fp32_sm86.engine (max batch 32, in 94x24, 68 classes x 18 steps)
+✓ Classifier (argmax) child 'classify': models/mobilenet_v3s_b1-32_fp16_sm86.engine (max batch 32, in 224x224, 1000 classes)
+relay stream 0 -> rtsp://localhost:8554/t5relay: no codec parameters yet (stream hasn't opened) - reconnecting
+relay stream 0 -> rtsp://localhost:8554/t5relay: no codec parameters yet (stream hasn't opened) - reconnecting
+relay stream 0 -> rtsp://localhost:8554/t5relay: no codec parameters yet (stream hasn't opened) - reconnecting
+[h264 @ 0x7bebdc006a80] left block unavailable for requested intra mode
+[h264 @ 0x7bebdc006a80] error while decoding MB 0 110, bytestream 1189
+[h264 @ 0x7bebdc006a80] concealing 6049 DC, 6049 AC, 6049 MV errors in P frame
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0000f00] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc000a3c0] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc000a3c0] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc000a3c0] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+[rtsp @ 0x7bebc0015600] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 21001 >= 3000
+relay stream 0 -> rtsp://localhost:8554/t5relay: av_interleaved_write_frame failed - reconnecting
+relay: stream 0 -> rtsp://localhost:8554/t5relay connected
+HEARTBEAT t=    60s rate= 137.7/s child_ms=0.053|0.068 rss=992MB dropped=0 sink_dropped=0
+HEARTBEAT t=   120s rate= 138.5/s child_ms=0.059|0.075 rss=1007MB dropped=0 sink_dropped=0
+HEARTBEAT t=   180s rate= 138.6/s child_ms=0.053|0.069 rss=1014MB dropped=0 sink_dropped=0
+HEARTBEAT t=   240s rate= 138.6/s child_ms=0.058|0.074 rss=1026MB dropped=0 sink_dropped=0
+HEARTBEAT t=   300s rate= 138.6/s child_ms=0.053|0.069 rss=1035MB dropped=0 sink_dropped=0
+HEARTBEAT t=   360s rate= 138.5/s child_ms=0.057|0.074 rss=1041MB dropped=0 sink_dropped=0
+HEARTBEAT t=   420s rate= 138.6/s child_ms=0.053|0.067 rss=1052MB dropped=0 sink_dropped=0
+HEARTBEAT t=   480s rate= 138.6/s child_ms=0.057|0.073 rss=1060MB dropped=0 sink_dropped=0
+HEARTBEAT t=   540s rate= 138.6/s child_ms=0.054|0.070 rss=1069MB dropped=0 sink_dropped=0
+SOAK n=83088 plates=6984 wall=601s rate=138.3/s events_lines=83088 rss_drift=309MB dropped=0 sink_dropped=0
+SOAK GATES: {'rss_drift<64MB': 'FAIL', 'rate_held': 'PASS', 'events==results': 'PASS', 'clean_stop': 'PASS'}

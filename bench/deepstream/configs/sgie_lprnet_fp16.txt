@@ -1,0 +1,26 @@
+# SGIE: LPRNet OCR on PGIE plate crops, same ONNX as CORDERO's stage 2.
+# Normalization parity: (pix - 127.5)/128 in BGR (LPRNet's cv2 pipeline)
+# -> net-scale-factor = 1/128, offsets 127.5, model-color-format=1 (BGR).
+# Known deviation (recorded): no --noTF32 equivalent in nvinfer; TF32 stays
+# on. Report-5 data says CTC decodes were identical under TF32 drift, so
+# string outputs are comparable; logits are not.
+[property]
+gpu-id=0
+onnx-file=/workspace/models/lprnet_dynamic.onnx
+model-engine-file=/workspace/models/lprnet_dynamic.onnx_b32_gpu0_fp16.engine
+batch-size=32
+network-mode=2
+network-type=1
+process-mode=2
+gie-unique-id=2
+operate-on-gie-id=1
+operate-on-class-ids=0
+infer-dims=3;24;94
+net-scale-factor=0.0078125
+offsets=127.5;127.5;127.5
+model-color-format=1
+classifier-threshold=0.0
+classifier-async-mode=0
+secondary-reinfer-interval=0
+parse-classifier-func-name=NvDsInferClassiferParseCtcLpr
+custom-lib-path=/workspace/bench/deepstream/parsers/liblprnet_parser.so

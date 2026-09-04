@@ -72,6 +72,21 @@ Covers:
                        child's own answer. Section A3 asserts the
                        complementary rejection (a CHAINED cascade, a child
                        of a child) now that sibling layers are legal.
+  J. CP1 cascade-parallelism A/B - per-child CUDA-stream parallelism (the
+                       default, ``PipelineConfig.cascade_serial=False``)
+                       versus today's pre-CP1 sequential path (``=True``,
+                       the escape hatch): the SAME 2-child tree section I2
+                       uses (read=ctc, classify=argmax) run twice on the
+                       SAME farm content, 60 results each. PASS = outputs
+                       equivalent: dominant plate string and top argmax
+                       label EQUAL between the two modes, and per-result
+                       ``outputs["read"]``/``outputs["classify"]`` lengths
+                       stay aligned with ``detections`` in both. Also
+                       prints each run's mean ``ChildOutput.ms_gpu`` per
+                       child - the first per-child GPU-stream timing
+                       numbers (RAW, not directly comparable in isolation
+                       across modes - see ``ChildOutput.ms_gpu``'s
+                       WHY-comment in ``core/result.h``).
 
 Run inside the tensorrt-dev docker (see examples/read_plates.py docstring),
 with the stream farm up:  python3 python/qa_matrix.py rtsp://... rtsp://...
@@ -691,7 +706,7 @@ def section_g1_demo(urls):
         ok = False
     if dets_seen == 0:
         print("  FAIL: outputs['classify'] never non-empty (no detections "
-              "seen at all - is plate content up? see CLAUDE.md's "
+              "seen at all - is plate content up? see BUILD.md's farm section - "
               "CLIP=media/atlas_plate_g30.mp4 farm override)")
         ok = False
     if ok:
@@ -798,15 +813,16 @@ def section_h_recommend():
 
     # H1: 4K/16-stream/skip=1/sahi tile 640, pooled (decode="all" default)
     # - cross-check against a MEASURED atlas cell (SAHI Refresh §3a,
-    # "640 | 33 | 8 | 16.765" pooled ms/frame - 16.8 here is that number
+    # v2 anchor (SAHI Refresh v2, 2026-09): measured pooled ms/frame at
+    # tile 640 / T=33 / N=8 is 16.576 - the band below is vs that cell
     # rounded) and confirm it correctly calls this over capacity: 16
     # streams * 30 fps / skip 1 = 480 offered inference fps against a
-    # ~60 fps whole-GPU tiled ceiling (1000/16.8).
+    # ~60 fps whole-GPU tiled ceiling (1000/16.6).
     print("  [H1] 4K/16-stream/skip=1/tile640 pooled vs the measured "
-          "16.8 ms/frame (SAHI Refresh)")
+          "16.58 ms/frame (SAHI Refresh v2)")
     r1 = pycamtrt.recommend(streams=16, resolution="4k", fps=30, skip=1,
                             decode="all", sahi={"tile": 640})
-    dev = abs(r1.predicted_gpu_ms_per_frame - 16.8) / 16.8
+    dev = abs(r1.predicted_gpu_ms_per_frame - 16.58) / 16.58
     print(f"    predicted={r1.predicted_gpu_ms_per_frame:.3f} ms/frame "
           f"(dev {dev * 100:.1f}% from 16.8), "
           f"holds_realtime={r1.holds_realtime}, "
@@ -913,7 +929,7 @@ def section_i1_yolo_e2e(urls):
     if dets == 0:
         print("  FAIL: expected >0 detections on plate-farm content (a "
               "COCO detector should still find e.g. person/tv/car in "
-              "frame - see CLAUDE.md's CLIP=media/atlas_plate_g30.mp4 "
+              "frame - see BUILD.md's farm section - CLIP=media/atlas_plate_g30.mp4 "
               "farm override)")
         ok = False
 
@@ -1112,13 +1128,144 @@ def section_i2_tree(urls):
     return ok
 
 
+def _build_read_classify_tree(urls, cascade_serial):
+    """The exact 2-child tree section_i2_tree uses (read=ctc,
+    classify=argmax over the yolov8-plates root), parameterized by
+    PipelineConfig.cascade_serial (CP1) - shared by section J's two A/B
+    runs so the only thing that differs between them is that one flag.
+    """
+    streams = pycamtrt.Streams(urls)
+    detect = one_layer(streams)  # family="yolo", DET = yolov8-plates
+    read = pycamtrt.Layer("read")
+    reng = read.add(pycamtrt.Engine(detect.steps[-1], OCR))
+    read.add(pycamtrt.Postprocess(reng, family="ctc"))
+    classify = pycamtrt.Layer("classify")
+    ceng = classify.add(pycamtrt.Engine(detect.steps[-1], CLASSIFIER,
+                                        norm=CLASSIFIER_NORM, color="rgb"))
+    classify.add(pycamtrt.Postprocess(ceng, family="argmax"))
+    return pycamtrt.Pipeline(streams, layers=[detect, read, classify],
+                             max_frames=60, cascade_serial=cascade_serial)
+
+
+def section_j_cascade_ab(urls):
+    print("[J] CP1 A/B equivalence: cascade_serial=False (default, "
+          "per-child CUDA streams) vs True (sequential escape hatch)")
+
+    def run(cascade_serial):
+        pipe = _build_read_classify_tree(urls, cascade_serial)
+        results = 0
+        align_ok = True
+        plate_counts = Counter()
+        label_counts = Counter()
+        ms_gpu_sum = [0.0, 0.0]  # index 0 = "read" child, 1 = "classify"
+        with pipe:
+            for r in pipe:
+                results += 1
+                texts = r.outputs["read"]
+                pairs = r.outputs["classify"]
+                n_dets = len(r.detections)
+                if len(texts) != n_dets or len(pairs) != n_dets:
+                    align_ok = False
+                plate_counts.update(t for t in texts if t)
+                label_counts.update(label for label, _ in pairs)
+                # r.children mirrors layers[1:] order (read, classify) - see
+                # pycamtrt.Result's docstring.
+                if len(r.children) >= 2:
+                    ms_gpu_sum[0] += r.children[0].ms_gpu
+                    ms_gpu_sum[1] += r.children[1].ms_gpu
+        top_plate = plate_counts.most_common(1)
+        top_label = label_counts.most_common(1)
+        return {
+            "results": results,
+            "align_ok": align_ok,
+            "dominant_plate": top_plate[0][0] if top_plate else None,
+            "top_label": top_label[0][0] if top_label else None,
+            "mean_ms_gpu_read": ms_gpu_sum[0] / results if results else 0.0,
+            "mean_ms_gpu_classify": ms_gpu_sum[1] / results if results else 0.0,
+        }
+
+    parallel = run(cascade_serial=False)
+    serial = run(cascade_serial=True)
+
+    def report(name, r):
+        print(f"  {name}: {r['results']} results, align_ok={r['align_ok']}, "
+              f"dominant_plate={r['dominant_plate']!r}, "
+              f"top_label={r['top_label']}")
+        print(f"    mean ChildOutput.ms_gpu: read={r['mean_ms_gpu_read']:.3f} ms  "
+              f"classify={r['mean_ms_gpu_classify']:.3f} ms")
+
+    report("parallel (cascade_serial=False)", parallel)
+    report("serial   (cascade_serial=True) ", serial)
+
+    ok = True
+    if parallel["results"] == 0 or serial["results"] == 0:
+        print("  FAIL: no results flowed in one or both runs")
+        return False
+    if not parallel["align_ok"] or not serial["align_ok"]:
+        print("  FAIL: outputs['read']/outputs['classify'] misaligned with "
+              "detections in one or both runs")
+        ok = False
+    if parallel["dominant_plate"] != serial["dominant_plate"]:
+        print("  FAIL: dominant plate string differs between "
+              "cascade_serial=False and cascade_serial=True")
+        ok = False
+    if parallel["top_label"] != serial["top_label"]:
+        print("  FAIL: top argmax label differs between "
+              "cascade_serial=False and cascade_serial=True")
+        ok = False
+
+    if ok:
+        print("  ok")
+    return ok
+
+
+def _section_gate_subprocess(tag, script, media, frames):
+    """K/L (v0.2.0): subprocess wrappers over the standalone bit-exact
+    gates - file-input based (deterministic, farm-independent), run in a
+    separate process so a crash cannot take the matrix down. SKIPs
+    (passing, loudly) when the clip is absent: the repo ships no media
+    (bring-your-own-clip, BUILD.md section 4) - run the script manually
+    with any clip to exercise the gate on a clip-less checkout."""
+    if not os.path.exists(media):
+        print(f"[{tag}] SKIP: {media} not present (bring-your-own-clip, "
+              f"see BUILD.md) - run python/{script} manually to exercise "
+              f"this gate")
+        return True
+    r = subprocess.run(
+        [sys.executable, os.path.join("python", script), media,
+         str(frames)],
+        capture_output=True, text=True, timeout=1200)
+    tail = [l for l in r.stdout.splitlines() if "overall" in l]
+    ok = r.returncode == 0
+    print(f"[{tag}] {tail[-1] if tail else 'no overall line'} "
+          f"{'PASS' if ok else 'FAIL'}")
+    if not ok:
+        print(r.stdout[-2000:])
+        print(r.stderr[-1000:])
+    return ok
+
+
+def section_k_embedding(urls):
+    return _section_gate_subprocess(
+        "K embedding", "_qa_embedding_gate.py",
+        "tools/stream_farm/media/atlas_plate_g30.mp4", 150)
+
+
+def section_l_select(urls):
+    return _section_gate_subprocess(
+        "L select-routing", "_qa_select_gate.py",
+        "tools/stream_farm/media/webcam_60s.mp4", 150)
+
+
 def main():
     urls = sys.argv[1:] or ["rtsp://localhost:8554/cam1"]
     results = [section_a_errors(urls), section_b_sahi(urls),
                section_c_keyonly(urls), section_d_per_stream(urls),
                section_e_frame_access(urls), section_f_sinks(urls),
                section_g_classifier(urls), section_h_recommend(),
-               section_i1_yolo_e2e(urls), section_i2_tree(urls)]
+               section_i1_yolo_e2e(urls), section_i2_tree(urls),
+               section_j_cascade_ab(urls), section_k_embedding(urls),
+               section_l_select(urls)]
     if all(results):
         print("QA MATRIX PASS")
         return 0
