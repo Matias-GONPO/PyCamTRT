@@ -209,11 +209,18 @@ import weakref
 from typing import (Callable, Dict, Iterable, List, Optional, Sequence,
                     Tuple, Union)
 
-import _pycamtrt as _c
+try:
+    # Installed layout (pip wheel/`pip install .`): the compiled module lives
+    # inside the package (CMake install() rule, see pyproject.toml).
+    from . import _pycamtrt as _c  # type: ignore[attr-defined]
+except ImportError:
+    # In-tree dev layout: PYTHONPATH=/workspace/build:/workspace/python puts
+    # the freshly built module on the top-level path (BUILD.md workflow).
+    import _pycamtrt as _c
 
 from ._capacity import Recommendation, recommend
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "Streams",

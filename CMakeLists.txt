@@ -19,7 +19,7 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
     set(CMAKE_CUDA_ARCHITECTURES 86)
 endif()
 
-project(PyCamTRT VERSION 0.2.0)
+project(PyCamTRT VERSION 0.3.0)
 
 enable_language(CUDA)
 
@@ -235,6 +235,11 @@ if(EXISTS "${VIDEO_CODEC_SDK_DIR}/Interface")
         target_include_directories(_pycamtrt PRIVATE src)
 
         target_link_libraries(_pycamtrt PRIVATE cordero)
+
+        # pip packaging (scikit-build-core, see pyproject.toml): the compiled
+        # module installs INSIDE the pycamtrt package. Harmless for the plain
+        # in-container `make` workflow, which never runs the install step.
+        install(TARGETS _pycamtrt LIBRARY DESTINATION pycamtrt)
     else()
         message(STATUS "Python3 not found - skipping _pycamtrt target")
     endif()

@@ -4,6 +4,21 @@ All notable changes to PyCamTRT. The project follows semantic versioning;
 every feature listed here shipped with a verification gate (bit-exact CPU
 references where possible — see `python/qa_matrix.py` and `src/*_test.cpp`).
 
+## v0.3.0 — pip packaging, phase 0 (2026-09)
+
+### Added
+- **`pip install .`** (scikit-build-core over the existing CMake build):
+  installs the `pycamtrt` package with the compiled `_pycamtrt` module
+  inside it — no more `PYTHONPATH=build:python`. Build-time environment
+  requirements are unchanged (run it inside the CUDA/TensorRT container,
+  see BUILD.md §2b); a prebuilt wheel needing no build environment is a
+  later phase.
+
+### Changed
+- The binding import is layout-aware: installed packages load
+  `pycamtrt._pycamtrt`; the in-tree dev workflow (`PYTHONPATH=build:python`)
+  keeps working via fallback.
+
 ## v0.2.0 — first public release (2026-09)
 
 ### Added

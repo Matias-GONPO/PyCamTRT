@@ -50,6 +50,24 @@ Notes:
   pass its python path; numpy must be installed there.
 - Run Python with `PYTHONPATH=/workspace/build:/workspace/python`.
 
+## 2b. Or: `pip install .` (same container, standard packaging)
+
+The repo carries a `pyproject.toml` (scikit-build-core), so inside the same
+container the whole §2 dance collapses to:
+
+```bash
+python3 -m pip install .
+```
+
+This compiles the identical CMake build and installs `pycamtrt` (with the
+compiled module inside the package) into site-packages — scripts then run
+with **no `PYTHONPATH` at all**. The environment prerequisites of §1 still
+apply at build time; this is packaging phase 0 (source install), not a
+prebuilt wheel. Rebuilds are incremental (the CMake tree is cached under
+`build/pip/`). The §2 `make` workflow remains fully supported for
+development — the package import falls back to the `PYTHONPATH` layout
+automatically.
+
 ## 3. Models and engines
 
 The repo commits redistributable `.onnx` exports; ultralytics-derived ones

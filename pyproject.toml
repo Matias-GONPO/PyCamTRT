@@ -1,0 +1,39 @@
+# pip packaging (phase 0): `pip install .` drives the existing CMake build via
+# scikit-build-core. This does NOT remove the environment requirements - the
+# machine (in practice: the CUDA/TensorRT container, see BUILD.md) still needs
+# nvcc, TensorRT, the Video Codec SDK headers and FFmpeg dev libs at BUILD
+# time. What it removes is the cmake/PYTHONPATH incantation: the package and
+# its compiled _pycamtrt module install into site-packages like anything else.
+# A prebuilt manylinux wheel (no build environment needed at install time) is
+# the separate, later phase - see the packaging notes in BUILD.md.
+
+[build-system]
+requires = ["scikit-build-core>=0.10"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "pycamtrt"
+version = "0.3.0"  # keep in lockstep with CMakeLists project() and __init__.__version__
+description = "Zero-copy multi-camera RTSP -> TensorRT cascade inference (Python control plane, C++/CUDA data plane)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+keywords = ["tensorrt", "rtsp", "nvdec", "video-analytics", "inference", "cuda"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
+
+[tool.scikit-build]
+# The pure-Python package ships from python/; the compiled _pycamtrt module is
+# added next to it by the CMake install() rule (DESTINATION pycamtrt).
+wheel.packages = ["python/pycamtrt"]
+cmake.build-type = "Release"
+# Cache the CMake tree under the (gitignored) build/ so pip rebuilds are
+# incremental instead of from-scratch every time.
+build-dir = "build/pip/{wheel_tag}"
