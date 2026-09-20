@@ -29,7 +29,7 @@ Covers:
                        extract_clip() writes a decodable, keyframe-first
                        raw .h264 clip from the packet ring
   G. M1b classifier cascade (argmax family) - G1: the detect->classify
-                       cascade demo (examples/classify_detections.py's
+                       cascade demo (examples/classify_detections/classify_detections.py's
                        pipeline shape) runs 60 results with outputs["classify"]
                        length always equal to len(detections) (alignment);
                        G2: a parity subprocess independently recomputes the
@@ -58,7 +58,7 @@ Covers:
                        root.
   I2. M4b depth-2 tree (the full-tree gate) - one detector root + TWO
                        sibling children (read=ctc, classify=argmax, the
-                       examples/read_and_classify.py shape) run 60 results:
+                       examples/read_and_classify/read_and_classify.py shape) run 60 results:
                        per result, outputs["read"]/outputs["classify"] are
                        both length == len(detections) (alignment), and the
                        legacy flat fields (r.texts/r.labels) equal the
@@ -77,7 +77,9 @@ Covers:
                        versus today's pre-CP1 sequential path (``=True``,
                        the escape hatch): the SAME 2-child tree section I2
                        uses (read=ctc, classify=argmax) run twice on the
-                       SAME farm content, 60 results each. PASS = outputs
+                       SAME content - the plate clip FILE when QA_CLIP
+                       exists (deterministic), else the live farm - 60
+                       results each. PASS = outputs
                        equivalent: dominant plate string and top argmax
                        label EQUAL between the two modes, and per-result
                        ``outputs["read"]``/``outputs["classify"]`` lengths
@@ -88,14 +90,14 @@ Covers:
                        across modes - see ``ChildOutput.ms_gpu``'s
                        WHY-comment in ``core/result.h``).
 
-Run inside the tensorrt-dev docker (see examples/read_plates.py docstring),
+Run inside the tensorrt-dev docker (see examples/read_plates/read_plates.py docstring),
 with the stream farm up:  python3 python/qa_matrix.py rtsp://... rtsp://...
 Exit 0 = all sections pass.
 
 Section E2 (hold_frames + torch CUDA Array Interface) runs in a SEPARATE
 process via _qa_hold_subprocess.py, not inline - see that file's docstring
 for why (a reproducible native-level exit-time crash when more than one
-cordero::Pipeline has existed in-process alongside a torch CAI consumer;
+pycamtrt::Pipeline has existed in-process alongside a torch CAI consumer;
 sections A-D above already construct several). Section G2 runs in a
 SEPARATE process for the same reason (hold_frames=True) - see
 _qa_classifier_parity_subprocess.py's docstring.
@@ -107,6 +109,8 @@ concrete, cited number, not just "it imports".
 """
 import json
 import os
+import shutil
+import pathlib
 import socket
 import subprocess
 import sys
@@ -125,19 +129,33 @@ OCR = "models/lprnet_b1-32_fp32_sm86.engine"
 # apples-to-apples class match.
 YOLO_E2E = "models/yolo26n_b1-8_fp16_sm86.engine"
 # M1b: the argmax-family classifier cascade demo's engine (see
-# python/export_classifier.py, examples/classify_detections.py).
+# python/export_classifier.py, examples/classify_detections/classify_detections.py).
 CLASSIFIER = "models/mobilenet_v3s_b1-32_fp16_sm86.engine"
 # M3a: true per-channel ImageNet norm (upgrade of M1b's scalar
 # approximation (-114.0, 1/58.6)) - see python/export_classifier.py's
 # derivation. Shared with _qa_classifier_parity_subprocess.py's NORM_OFFSET/
-# NORM_SCALE and examples/classify_detections.py's CLASSIFIER_NORM (kept in
+# NORM_SCALE and examples/classify_detections/classify_detections.py's CLASSIFIER_NORM (kept in
 # sync by hand - all three demo the same engine/norm pairing).
 CLASSIFIER_NORM = ((-123.675, -116.28, -103.53), (1 / 58.395, 1 / 57.12, 1 / 57.375))
 
-# Conda ffprobe (matches HANDOFF.md's "all Python uses conda Python-dev" -
-# ffprobe ships in that env, used here purely as an external verifier, not
-# imported as a library).
-FFPROBE = "/home/matiasu/anaconda3/envs/Python-dev/bin/ffprobe"
+# ffprobe: FFPROBE env var, else whatever is on PATH.
+FFPROBE = (os.environ.get("FFPROBE") or shutil.which("ffprobe")
+           or str(pathlib.Path(sys.executable).parent / "ffprobe"))   # conda-style env: next to the interpreter
+# Deterministic content for the cross-run A/B gates (I2, J): the plate clip
+# FILE when present, else the live farm URLs (see section J's comment).
+QA_CLIP = os.environ.get("QA_CLIP", "tools/stream_farm/media/atlas_plate_g30.mp4")
+
+
+def ab_source(urls):
+    """File input when QA_CLIP exists (both runs then see the SAME frames),
+    otherwise the live farm - where two runs can sample different loop
+    segments and a top-label mismatch is not conclusive."""
+    if os.path.isfile(QA_CLIP):
+        print(f"  source: {QA_CLIP} (file - deterministic content)")
+        return [QA_CLIP]
+    print("  source: live farm (QA_CLIP not found; cross-run comparisons may "
+          "sample different loop segments)")
+    return urls
 
 
 def one_layer(streams, engine=DET, **post_kw):
@@ -1017,12 +1035,12 @@ def section_i1_yolo_e2e(urls):
 def section_i2_tree(urls):
     print("[I2] M4b depth-2 tree (full-tree gate): 1 detector root + 2 "
           "sibling children (read=ctc, classify=argmax)")
-    streams = pycamtrt.Streams(urls)
+    streams = pycamtrt.Streams(ab_source(urls))   # tree, read-only and classify-only runs share it
     ok = True
 
     # The tree: 1 detector root ("detect") + 2 SIBLING children ("read"
     # ctc, "classify" argmax) - both crop `detect`'s own Postprocess step
-    # directly (examples/read_and_classify.py's exact shape).
+    # directly (examples/read_and_classify/read_and_classify.py's exact shape).
     detect = one_layer(streams)  # family="yolo", DET = yolov8-plates
     read = pycamtrt.Layer("read")
     reng = read.add(pycamtrt.Engine(detect.steps[-1], OCR))
@@ -1150,9 +1168,16 @@ def _build_read_classify_tree(urls, cascade_serial):
 def section_j_cascade_ab(urls):
     print("[J] CP1 A/B equivalence: cascade_serial=False (default, "
           "per-child CUDA streams) vs True (sequential escape hatch)")
+    # A/B on a FILE when one is available: the two runs then see the SAME
+    # frames, so a differing top label is a real divergence. On the looping
+    # live farm the two runs sample different loop segments, and the plate
+    # clip carries two dominant classifier labels (530 on its opening
+    # segment, 919 afterwards) - measured 2026-09-16: the file A/B agreed
+    # 60/60 labels while the live gate flipped 1 run in 3 on that alone.
+    src = ab_source(urls)
 
     def run(cascade_serial):
-        pipe = _build_read_classify_tree(urls, cascade_serial)
+        pipe = _build_read_classify_tree(src, cascade_serial)
         results = 0
         align_ok = True
         plate_counts = Counter()

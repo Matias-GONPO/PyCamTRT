@@ -17,9 +17,9 @@ color="rgb". This is a MECHANICS demo for the embedding family - a real
 re-ID deployment would export a purpose-trained checkpoint (e.g. OSNet)
 through this same shape contract ([N, D], 2D).
 
-Run (conda Python-dev env, CPU only):
+Run (host Python env with torchvision, CPU only):
 
-    ~/anaconda3/envs/Python-dev/bin/python3 python/export_resnet18_embed.py
+    python3 python/export_resnet18_embed.py
 """
 from pathlib import Path
 

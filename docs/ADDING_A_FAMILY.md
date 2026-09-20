@@ -1,7 +1,7 @@
 # Adding a compiled postprocess family (M3b)
 
 This is a walkthrough for a competent C++/CUDA contributor who needs to add
-a NEW raw-tensor postprocess family to CORDERO — a genuinely custom model
+a NEW raw-tensor postprocess family to PyCamTRT — a genuinely custom model
 head, not something `Postprocess(family="yolo"/"ctc"/"argmax")` already
 covers. It uses **Argmax as the worked example**, because that family was
 added in M1a *for exactly this purpose*: a template a future family can be
@@ -12,13 +12,13 @@ symbols, never line numbers (they rot).
 If you only want to filter/count/alert on a model's already-decoded
 detections (survivors, not the raw tensor), you don't need any of this —
 see the package docstring's "Custom postprocessing — two tiers" section
-and `examples/zone_filter.py` instead. Section 1 below is the actual
+and `examples/zone_filter/zone_filter.py` instead. Section 1 below is the actual
 decision test.
 
 ## 1. When you need this vs. when Python-on-results suffices
 
-CORDERO's custom-processing split is by **tensor size**, not by
-preference (a settled design rule from the CORDERO research repo, "Custom
+PyCamTRT's custom-processing split is by **tensor size**, not by
+preference (a settled design rule from the research repo, "Custom
 models -> custom postprocess — split by TENSOR SIZE"):
 
 - **Postprocess that reads the RAW OUTPUT TENSOR** — a model's raw head,
@@ -27,7 +27,7 @@ models -> custom postprocess — split by TENSOR SIZE"):
   didn't matter — is **GPU-only, compiled**. This is what this document
   covers. The reason isn't taste: that tensor is megabytes, every frame,
   and Python callback latency (plus the GIL) in that path is exactly the
-  per-frame Python involvement CORDERO's whole architecture exists to
+  per-frame Python involvement PyCamTRT's whole architecture exists to
   avoid (the house rule: "Python = control plane, C++ = data plane. No
   Python in the per-frame path, ever.").
 - **Postprocess on the COMPACT RESULT** — the tens-of-survivors detection
@@ -35,7 +35,7 @@ models -> custom postprocess — split by TENSOR SIZE"):
   *already* produced — is legal, encouraged, ordinary Python on the
   consumer thread. It cannot touch the per-frame GPU path because by
   construction it runs after the GPU thread has moved on. See
-  `examples/zone_filter.py` for a full worked example of that tier, and
+  `examples/zone_filter/zone_filter.py` for a full worked example of that tier, and
   the package docstring (`python/pycamtrt/__init__.py`) for the contract.
 
 The litmus test: does your code need every anchor / every pixel of a raw
@@ -228,7 +228,7 @@ bit-exact where possible."). No family is done without both of these:
   `[G] M1b classifier cascade (argmax family)`): the Python-level
   end-to-end gate, in two parts —
   - `section_g1_demo` (`[G1]`): runs the real cascade shape
-    (`examples/classify_detections.py`'s pipeline — detect layer feeding
+    (`examples/classify_detections/classify_detections.py`'s pipeline — detect layer feeding
     an `Engine`+`Postprocess(family="argmax")` classify layer) for 60
     results and asserts `len(r.outputs["classify"]) == len(r.detections)`
     on every single result (alignment, not correctness).
@@ -251,7 +251,7 @@ bit-exact where possible."). No family is done without both of these:
 
 Everything above is a **recompile-required, compiled-in family**: adding
 one means touching seven files/functions and rebuilding
-`libcordero`/`_pycamtrt` inside the `tensorrt-dev` container. There is no
+`libpycamtrt_core`/`_pycamtrt` inside the `tensorrt-dev` container. There is no
 `.so`-loaded plugin ABI today — no `dlopen`, no stable C ABI boundary for
 third-party kernels, no registry a family can drop itself into at
 runtime. That's a deliberate, currently-accepted scope limit, not an
@@ -264,7 +264,7 @@ contract, versioning, ABI compatibility). Argmax (M1a) is the second data
 point after Yolo/Ctc that this compiled-family shape scales to a genuinely
 different kind of model (detector -> classifier, not detector -> OCR);
 until a THIRD or later family finds the recompile cost prohibitive, this
-document — not a plugin system — is the supported way to extend CORDERO's
+document — not a plugin system — is the supported way to extend PyCamTRT's
 raw-tensor postprocess.
 
 ---

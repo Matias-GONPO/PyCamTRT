@@ -78,6 +78,29 @@ PYTHONPATH=build:python python3 bench/pycamtrt_side.py \
 Raw logs, latency splits, GPU CSVs and parsed tables land under
 `bench/results/<date>/` — the archive behind any number we publish.
 
+## The dials, head-to-head (19 September 2026)
+
+DeepStream exposes the same two capacity dials PyCamTRT does, so the
+validation atlas (`bench/atlas/capacity_atlas.sh <res> <dir> mini`) was run
+for both systems on the same farm, GOP content and hour:
+
+- inference rate: PyCamTRT `skip=k` <=> nvinfer `interval=k-1` in the
+  `[primary-gie]` group (infer every k-th decoded frame);
+- decode rate: PyCamTRT `decode="key"` <=> `intra-decode-enable=1` on every
+  `[sourceN]` (the decoder outputs keyframes only, one per GOP).
+
+`bench/deepstream/gen_app_config_dials.sh` writes the latency-tuned config
+with both knobs; `bench/deepstream/ds_dials.sh` runs the grid;
+`bench/atlas/atlas_vs_deepstream.py` compares and draws the figure.
+
+Two caveats the figure states: DeepStream's post-decode latency under
+`interval>0` is a per-buffer median over inferred AND skipped frames, so
+latency is compared at full rate only; in keyframe mode its latency line does
+not parse and is recorded as NA. Hold on the PyCamTRT side is measured by
+`rtsp_infer_multi` from process start (ramp included) and tops out at 96-97 %,
+while DeepStream's PERF counter is steady-state; the 95 % threshold absorbs
+that.
+
 ## Known asymmetries (declared, not hidden)
 
 - DeepStream's SGIE batching, OSD and tracker stages are disabled/absent

@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Parses deepstream-app --latency stdout into CORDERO-comparable splits.
+"""Parses deepstream-app --latency stdout into PyCamTRT-comparable splits.
 
-Component mapping to CORDERO's pre/queue/gpu latency split (report 3
+Component mapping to PyCamTRT's pre/queue/gpu latency split (report 3
 methodology), recorded as an approximation, not an identity:
   pre   <- nvv4l2decoder0 component latency  (decode)
   queue <- nvstreammux-src_bin_muxer component_latency (wait to close batch)
   gpu   <- primary_gie + secondary_gie_0 component latency (stage1+stage2)
   total <- "Frame latency" (source-timestamp to last-probe, includes decode
-           queueing that CORDERO's clock doesn't start until PopFrame)
+           queueing that PyCamTRT's clock doesn't start until PopFrame)
 
 Usage: docker run ... deepstream-app -c CFG -t | parse_latency.py [--warmup N]
 Discards the first `warmup` frames per source (default 60 = ~2s at 30fps)
 to exclude the engine-build/pipeline-ramp transient, same discipline
-CORDERO's own benchmarks use.
+PyCamTRT's own benchmarks use.
 """
 import re
 import sys

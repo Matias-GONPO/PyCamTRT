@@ -1,4 +1,4 @@
-// Part 2: lifecycle-robustness test for cordero::Pipeline - deliberately
+// Part 2: lifecycle-robustness test for pycamtrt::Pipeline - deliberately
 // hammers the edge cases a careless consumer of the library would hit
 // (Stop()-before-Start(), double-Stop(), dtor-only teardown, Start()-after-
 // Stop(), Poll() at every lifecycle boundary, a slow consumer against the
@@ -41,16 +41,16 @@
 
 #include "core/pipeline.h"
 
-using cordero::Backpressure;
-using cordero::Family;
-using cordero::FrameResult;
-using cordero::LayerDesc;
-using cordero::Pipeline;
-using cordero::PipelineConfig;
-using cordero::StepDesc;
-using cordero::StepKind;
-using cordero::StreamDesc;
-using cordero::StreamInfo;
+using pycamtrt::Backpressure;
+using pycamtrt::Family;
+using pycamtrt::FrameResult;
+using pycamtrt::LayerDesc;
+using pycamtrt::Pipeline;
+using pycamtrt::PipelineConfig;
+using pycamtrt::StepDesc;
+using pycamtrt::StepKind;
+using pycamtrt::StreamDesc;
+using pycamtrt::StreamInfo;
 
 namespace {
 

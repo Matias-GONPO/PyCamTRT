@@ -61,7 +61,10 @@ python3 -m pip install .
 
 This compiles the identical CMake build and installs `pycamtrt` (with the
 compiled module inside the package) into site-packages — scripts then run
-with **no `PYTHONPATH` at all**. The environment prerequisites of §1 still
+with **no `PYTHONPATH` at all**. pybind11 comes from the build requirements
+(`pyproject.toml`), so this path needs neither `git` nor a network fetch for
+it; the plain cmake path in §2 uses an installed `pybind11` package if the
+interpreter has one and otherwise downloads the pinned release tarball once. The environment prerequisites of §1 still
 apply at build time; this is packaging phase 0 (source install), not a
 prebuilt wheel. Rebuilds are incremental (the CMake tree is cached under
 `build/pip/`). The §2 `make` workflow remains fully supported for
@@ -127,6 +130,9 @@ PYTHONPATH=build:python python3 python/qa_matrix.py  # full acceptance matrix
 | piped container stdout appears frozen | docker pipes are block-buffered — prefer log files/markers over live greps |
 | relative paths break | binaries expect cwd = repo root (`/workspace`) |
 | engine builds/loads fail after a TensorRT upgrade | delete the cached `.engine`; auto-built caches rebuild themselves once automatically |
+| `cmake` reports "Could NOT find Python3 (missing: Development ...)" on a bare `nvcr.io/nvidia/tensorrt` image, even with the right `-DPython3_EXECUTABLE=` | trap #3 (found building `examples/*/Dockerfile`): the image's own python3 has no headers/lib until `python3-dev`/`libpython3.NN-dev` is installed — the root `Dockerfile` doesn't install it (only needed for `_pycamtrt`, which its own dev workflow builds against a mounted conda env instead). Once a build directory has CACHED a NOTFOUND for this, reconfiguring the SAME directory after installing the package still won't retry — delete/recreate the build directory. |
+| `nvcc`-compiled binaries segfault at startup with a TensorRT "CUDA initialization failure", and the container printed `This container was built for NVIDIA Driver Release ... but version ... was detected` | trap #4: the pinned base image tag's CUDA toolkit is newer than the host's NVIDIA driver supports. Reproduces with a bare, unmodified upstream image (`docker run --gpus all <tag> nvidia-smi` still works; anything touching the CUDA *runtime* at the newer toolkit's API level doesn't) — not a code or build bug. Fix is either a driver update or deliberately re-pinning the `Dockerfile`'s base image tag to one whose CUDA version the driver supports; check `nvidia-smi`'s reported `CUDA Version` against the tag's bundled toolkit before assuming anything else is wrong. |
+| the whole-project build (`pip install .`, or a bare `make`/`make all`) fails on `rtsp_decode.cpp`/`preprocess_test.cpp`/`rtsp_infer.cpp` with `too few arguments to function 'cuCtxCreate_v4'` | a newer CUDA toolkit than these legacy Step 3/4 single-stream checkpoint binaries were written against (their `cuCtxCreate` call predates a driver-API signature change). None of `pycamtrt_core`/`_pycamtrt`/`rtsp_infer_multi`/the C++ examples touch this code path — build just the targets you need (`make -j <target>`) rather than `make all`/`pip install .` to route around it entirely. |
 
 > **Sanity check after configuring**: the cmake output must say
 > `CMAKE_BUILD_TYPE: Release` (the default since v0.2.0). An empty build

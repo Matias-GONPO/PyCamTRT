@@ -1,4 +1,4 @@
-// Part 1: cordero::Pipeline - the multi-stream pipeline orchestration moved
+// Part 1: pycamtrt::Pipeline - the multi-stream pipeline orchestration moved
 // out of rtsp_infer_multi.cpp's main()/Producer()/GPU-loop into a reusable
 // library core. See pipeline.h for the public contract; this file keeps
 // every WHY-comment from the original code intact, adjusted only for
@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cmath>
 #include <condition_variable>
 #include <cstdarg>
@@ -54,7 +55,7 @@ extern "C" {
 #include "postprocess.h"
 #include "preprocess.h"
 
-namespace cordero {
+namespace pycamtrt {
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -501,8 +502,8 @@ ExecPlan Validate(const PipelineConfig& cfg) {
         // check above); LPRNet/OCR (Ctc) is the original concrete example,
         // so an Argmax classifier (or any additional sibling) inherits the
         // SAME position default unless it overrides norm/color explicitly
-        // (e.g. per-channel ImageNet norm - see examples/
-        // classify_detections.py).
+        // (e.g. per-channel ImageNet norm - see
+        // examples/classify_detections/classify_detections.py).
         bool rgb = false;
         ResolveNormColor(e, kL1DefOffset, kL1DefScale, /*def_rgb=*/false,
                          cp.norm_offset, cp.norm_scale, &rgb);
@@ -1205,7 +1206,6 @@ struct Pipeline::Impl {
     CUcontext ctx = nullptr;
     CUdevice dev = 0;  // valid iff ctx != nullptr - Teardown() needs it for
                        // cuDevicePrimaryCtxRelease
-    CUvideoctxlock ctx_lock = nullptr;
     std::unique_ptr<TrtEngine> engine;
     int classes = 0, anchors = 0, mb = 0;
     // M4a: yolo-e2e's row count per image (300 for yolo26n) - the
@@ -1739,8 +1739,6 @@ void Pipeline::Impl::Setup() {
     cudaStreamSynchronize(gpu_stream);
     engine->SetBatch(1);
 
-    ctx_lock = NvDecoder::CreateContextLock(ctx);
-
     // Owned here, not by the producers: destroyed only after the GPU
     // thread joins, since queued batches reference ring memory. Built with
     // emplace_back (one at a time, see rings' deque WHY-comment above),
@@ -1799,7 +1797,6 @@ void Pipeline::Impl::Setup() {
 void Pipeline::Impl::Teardown() {
     if (!ctx) return;  // Setup() never completed (ctor threw)
     cuCtxSetCurrent(ctx);
-    if (ctx_lock) NvDecoder::DestroyContextLock(ctx_lock);
     for (float* p : extra_inputs) cudaFree(p);
     cudaFree(d_params);
     cudaFree(d_cands);
@@ -1897,6 +1894,15 @@ void Pipeline::Impl::ProducerLoop(int id) {
     cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, prio_hi);
     cudaEvent_t preprocess_done;
     cudaEventCreate(&preprocess_done);
+    // One NVDEC context lock PER PRODUCER (NVIDIA's sample creates one per
+    // NvDecoder instance). The previous single Impl-wide lock made every
+    // submit/map/unmap of every camera wait for every other camera's, and a
+    // map that waited on the inference stream (see NvDecoder.h) held it for
+    // the whole batch: measured 2026-09-18, this and output_stream together
+    // moved the full-inference ceiling from 24 to 48 cameras at 720p and
+    // from 16 to 24 at 1080p (the NVDEC wall). Destroyed after the reconnect
+    // loop below, i.e. after every NvDecoder built on it is gone.
+    CUvideoctxlock ctx_lock = NvDecoder::CreateContextLock(ctx);
 
     // Churn handling: a live camera drops and comes back. On any stream
     // error (open failure, mid-run disconnect, decode error) the demuxer
@@ -1934,13 +1940,23 @@ void Pipeline::Impl::ProducerLoop(int id) {
                (max_frames == 0 || decoded < max_frames);
     };
 
+    // DIAGNOSTIC (PYCAMTRT_DIAG_DEMUX set): parser delay per frame = time
+    // from the packet leaving the demuxer to its decoded picture being
+    // popped. Matched by pts through a small ring, summarized at exit.
+    const bool diag_demux = std::getenv("PYCAMTRT_DIAG_DEMUX") != nullptr;
+    struct DemuxStamp { int64_t pts = -2; Clock::time_point t; };
+    DemuxStamp demux_ring[64]; unsigned demux_head = 0;
+    double diag_sum_ms = 0.0; long diag_n = 0;
+
     while (wanted()) {
     try {
         FFmpegDemuxer demuxer(url);
         NvDecoder decoder(ctx_lock,
                           demuxer.GetCodecID() == AV_CODEC_ID_HEVC
                               ? cudaVideoCodec_HEVC
-                              : cudaVideoCodec_H264);
+                              : cudaVideoCodec_H264,
+                          stream);  // map post-processing on this
+                                    // producer's stream (NvDecoder.h)
         if (opened_once) {
             atomics.reconnects++;
             Logf("stream %d: reconnected (%s)", id, url.c_str());
@@ -1971,6 +1987,7 @@ void Pipeline::Impl::ProducerLoop(int id) {
             // PacketRing::Push copies immediately, before this loop can ever
             // advance past this point.
             if (cfg.ring_seconds > 0) packet_rings[id].Push(data, size, pts_us, is_key);
+            if (diag_demux) { demux_ring[demux_head++ & 63] = {pts_us, Clock::now()}; }
 
             // Decode skipping (keyframe-only mode): drop every non-key
             // packet BEFORE the decoder. A P-frame is an edit of prior
@@ -1985,8 +2002,32 @@ void Pipeline::Impl::ProducerLoop(int id) {
             // holding a mapped surface that never gets released.
             while (wanted() && decoder.PopFrame(&frame)) {
                 last_success = Clock::now();
+                if (diag_demux && frame.timestamp >= 0) {
+                    for (const DemuxStamp& ds : demux_ring)
+                        if (ds.pts == frame.timestamp) {
+                            diag_sum_ms += std::chrono::duration<double, std::milli>(last_success - ds.t).count();
+                            diag_n++; break;
+                        }
+                }
                 backoff_ms = 250;  // healthy again: reset the backoff
                 decoded++;
+                // P2 camera_fleet_ops MUST-FIX: `atomics.decoded` (the
+                // value GetStreamInfo() actually reports) used to be
+                // written ONLY once, at producer-loop exit (see the
+                // `atomics.decoded = decoded;` a few dozen lines below,
+                // just before this loop's `reconnect loop` label) - which
+                // means every LIVE poll of stream_info().decoded during a
+                // normal run (the whole point of a status ticker) read 0
+                // for the entire lifetime of the stream, only ever seeing
+                // the true count at shutdown. The StreamAtomic struct's
+                // own comment already promised "both sides can touch it
+                // lock-free while the run is live" - true for the atomic
+                // itself, just never actually written live. Publishing it
+                // here, every decoded frame, is what makes that promise
+                // real; relaxed ordering is enough (this is a monotonic
+                // counter read for telemetry, not a synchronization point
+                // with any other memory).
+                atomics.decoded.store(decoded, std::memory_order_relaxed);
                 // Frame skipping: run inference on every skip-th decoded
                 // frame, phase-offset by stream id so the streams don't all
                 // detect on the same tick (which would spike batch sizes).
@@ -1996,6 +2037,10 @@ void Pipeline::Impl::ProducerLoop(int id) {
                 // deliberate: it isolates the GPU-cycle hypothesis for the
                 // 16-stream latency while holding ctx_lock load constant.
                 if ((decoded + id) % skip != 0) {
+                    // The map's post-processing is queued on `stream`;
+                    // drain it before unmapping (cheap: nothing else is
+                    // pending on this stream for a skipped frame).
+                    cudaStreamSynchronize(stream);
                     decoder.ReleaseFrame(frame);
                     continue;
                 }
@@ -2029,6 +2074,7 @@ void Pipeline::Impl::ProducerLoop(int id) {
                     // (already false, since `stop` flips before
                     // Batcher::stopping does) at every loop level below.
                     ring.ReleaseSlot(rs);
+                    cudaStreamSynchronize(stream);  // see the skip path above
                     decoder.ReleaseFrame(frame);
                     stopped_mid = true;
                     break;
@@ -2094,7 +2140,7 @@ void Pipeline::Impl::ProducerLoop(int id) {
         // route it through the same retry path as an exception. A file
         // source, though, has a legitimate end - av_read_frame delivers a
         // genuine AVERROR_EOF at the true end of the file (confirmed by the
-        // prior investigation, see CORDERO manual/FINDINGS.md's "MP4 file
+        // prior investigation, see the research project's FINDINGS ledger's "MP4 file
         // input fails" entry), and requesting more frames than the file
         // contains is not a disconnect to retry, it's just a shorter-than-
         // asked-for clean run. Skipped entirely on a deliberate Stop()
@@ -2128,8 +2174,11 @@ void Pipeline::Impl::ProducerLoop(int id) {
     break;  // decoded >= max_frames, or Stop(): clean completion
     }      // reconnect loop
     atomics.decoded = decoded;
+    if (diag_demux && diag_n > 0)
+        Logf("DIAG stream %d: demux->pop mean %.2f ms over %ld frames", id, diag_sum_ms / diag_n, diag_n);
     cudaEventDestroy(preprocess_done);
     cudaStreamDestroy(stream);
+    NvDecoder::DestroyContextLock(ctx_lock);  // per-producer lock
     batcher.ProducerDone();
 }
 
@@ -3130,6 +3179,35 @@ void Pipeline::Impl::RelaySinkLoop(RelaySink& sink) {
     int backoff_ms = 250;
     constexpr int kBackoffMaxMs = 5000;
 
+    // ---- State that PERSISTS ACROSS RECONNECTS -----------------------
+    // (declared outside the reconnect loop below on purpose - see each
+    // var's WHY-comment). Everything else the inner loop uses (pts_anchor/
+    // t_anchor, the AVFormatContext itself) is per-connection and declared
+    // inside the try block, reset fresh on every reconnect as before.
+    //
+    // last_sent_seq: a reconnect RESUMES the live-follow cursor from where
+    // it left off instead of restarting at 0 - restarting at 0 was the
+    // permanent-lag bug (every dropped/reconnected relay connection used
+    // to replay the WHOLE ~ring_seconds of retained history, paced in real
+    // time, before catching back up to live - so a source that reconnects
+    // even occasionally left viewers seconds behind forever). 0 is
+    // SnapshotSinceSeq's own "nothing sent yet" sentinel, so a true first
+    // connection still gets the full IDR-anchored ring for free.
+    uint64_t last_sent_seq = 0;
+    // out_offset_us/last_out_pts_us/last_delta_us: the output-timestamp
+    // rebasing chain (see the discontinuity check inside the loop below).
+    // MUST persist across reconnects too, for the same reason as
+    // last_sent_seq: reconnecting opens a fresh AVFormatContext (which
+    // will happily accept any starting pts), but the OUTPUT TIMELINE this
+    // sink has already published to viewers must keep climbing across
+    // that seam - resetting these on reconnect would reintroduce exactly
+    // the jump/rebase this fix exists to remove, just moved to a
+    // reconnect boundary instead of a source pts wrap.
+    int64_t out_offset_us = 0;
+    int64_t last_out_pts_us = -1;
+    int64_t last_delta_us = 33'000;  // ~30 fps guess until the first real
+                                      // inter-packet delta is observed
+
     while (!sink.stopping.load(std::memory_order_relaxed)) {
         AVFormatContext* oc = nullptr;
         AVStream* st = nullptr;
@@ -3165,30 +3243,62 @@ void Pipeline::Impl::RelaySinkLoop(RelaySink& sink) {
                  sink.desc.target.c_str());
             backoff_ms = 250;
 
-            // Live-follow loop: SnapshotSince(last_sent_pts) returns only
-            // packets not yet sent (see PacketRing::SnapshotSince's
-            // WHY-comment) - the FIRST call (last_sent_pts == -1) returns
-            // the WHOLE ring, which is always IDR-anchored by construction
-            // (see PacketRing::TrimLocked), so "loop: pull next packets from
-            // ring (starting at anchor IDR)" falls out with no separate
-            // anchor search here. Playback is paced to the SOURCE's real
-            // pts deltas (see the sleep below), so a fresh relay connection
-            // replays the ring's ~ring_seconds of retained history in real
-            // time before catching up to live and continuing there.
-            int64_t last_sent_pts = -1;
+            // Live-follow loop: SnapshotSinceSeq(last_sent_seq) returns only
+            // packets not yet sent (see PacketRing::SnapshotSinceSeq's
+            // WHY-comment - a seq cursor, unlike the old pts-keyed one,
+            // survives a looping source's pts wrapping back down at every
+            // clip boundary). last_sent_seq == 0 (true first connection
+            // only, since it persists across reconnects - see its
+            // declaration above) returns the WHOLE ring, which is always
+            // IDR-anchored by construction (see PacketRing::TrimLocked), so
+            // "loop: pull next packets from ring (starting at anchor IDR)"
+            // falls out with no separate anchor search here. Playback is
+            // paced to the OUTPUT pts deltas (see the sleep below), so a
+            // true first relay connection replays the ring's ~ring_seconds
+            // of retained history in real time before catching up to live
+            // and continuing there; a reconnect resumes mid-stream instead.
             int64_t pts_anchor = -1;
             Clock::time_point t_anchor{};
             while (!sink.stopping.load(std::memory_order_relaxed)) {
                 std::vector<RingPacket> batch =
-                    packet_rings[sid].SnapshotSince(last_sent_pts);
+                    packet_rings[sid].SnapshotSinceSeq(last_sent_seq);
                 for (const RingPacket& p : batch) {
                     if (sink.stopping.load(std::memory_order_relaxed)) break;
-                    if (pts_anchor < 0) {
-                        pts_anchor = p.pts_us;
+
+                    // Output-timestamp normalization: rebase the muxed
+                    // timeline across any source pts discontinuity
+                    // (regression OR stall) instead of stamping p.pts_us
+                    // straight through. A looping publisher's pts wraps
+                    // back down at every clip boundary - stamping that
+                    // directly is exactly the "non monotonically
+                    // increasing dts" the RTSP muxer throws on, which is
+                    // what was driving the reconnect loop this fix
+                    // removes. out_offset_us accumulates across every
+                    // wrap seen so far, so out_pts keeps climbing forever
+                    // regardless of how many times the source loops.
+                    int64_t out_pts = p.pts_us + out_offset_us;
+                    if (last_out_pts_us >= 0 && out_pts <= last_out_pts_us) {
+                        const int64_t old_offset = out_offset_us;
+                        out_offset_us = last_out_pts_us + last_delta_us - p.pts_us;
+                        out_pts = p.pts_us + out_offset_us;
+                        Logf("relay stream %d: source pts discontinuity "
+                             "(+%lld ms), rebased",
+                             sid, (long long)((out_offset_us - old_offset) / 1000));
+                        // Re-anchor pacing on the rebased value so the
+                        // seam itself paces as one normal inter-packet
+                        // step, not a burst (if the wrap made out_pts jump
+                        // far ahead of the old anchor) or a stall (if it
+                        // landed behind).
+                        pts_anchor = out_pts;
                         t_anchor = Clock::now();
-                    } else if (p.pts_us > pts_anchor) {
+                    }
+
+                    if (pts_anchor < 0) {
+                        pts_anchor = out_pts;
+                        t_anchor = Clock::now();
+                    } else if (out_pts > pts_anchor) {
                         const auto due =
-                            t_anchor + std::chrono::microseconds(p.pts_us - pts_anchor);
+                            t_anchor + std::chrono::microseconds(out_pts - pts_anchor);
                         const auto now = Clock::now();
                         if (due > now)
                             InterruptibleSleep(sink.stopping, sink.wait_m,
@@ -3199,13 +3309,20 @@ void Pipeline::Impl::RelaySinkLoop(RelaySink& sink) {
                     memcpy(pkt->data, p.data.data(), p.data.size());
                     pkt->stream_index = st->index;
                     pkt->pts = pkt->dts =
-                        av_rescale_q(p.pts_us, AVRational{1, 1000000}, st->time_base);
+                        av_rescale_q(out_pts, AVRational{1, 1000000}, st->time_base);
                     if (p.keyframe) pkt->flags |= AV_PKT_FLAG_KEY;
                     const int wret = av_interleaved_write_frame(oc, pkt);
                     av_packet_free(&pkt);
                     if (wret < 0)
                         throw std::runtime_error("av_interleaved_write_frame failed");
-                    last_sent_pts = p.pts_us;
+                    last_sent_seq = p.seq;
+                    // Track the last NORMAL step's delta so a rebase (above)
+                    // has a sane spacing to continue from. After a rebase
+                    // this recomputes to the same last_delta_us by
+                    // construction (out_pts - last_out_pts_us ==
+                    // last_delta_us there), so no special-casing needed.
+                    if (last_out_pts_us >= 0) last_delta_us = out_pts - last_out_pts_us;
+                    last_out_pts_us = out_pts;
                 }
                 // Poll interval: new packets arrive at roughly the source's
                 // frame period (tens of ms) - 20 ms keeps relay latency low
@@ -3502,4 +3619,4 @@ uintptr_t Pipeline::OutputBindingAddr() const {
     return reinterpret_cast<uintptr_t>(impl_->engine->OutputPtr());
 }
 
-}  // namespace cordero
+}  // namespace pycamtrt

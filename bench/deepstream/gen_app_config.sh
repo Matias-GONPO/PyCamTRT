@@ -40,7 +40,7 @@ gpu-id=0
 live-source=1
 batch-size=${N}
 # Max wait to close a partial batch. 33 ms = one frame interval — mirrors
-# CORDERO's "batch whatever has arrived" policy as closely as DS allows.
+# PyCamTRT's "batch whatever has arrived" policy as closely as DS allows.
 batched-push-timeout=33000
 width=1280
 height=720

@@ -13,9 +13,9 @@ the library).
 Measured per stream: per-frame processing latency split
 (preprocess / infer / postprocess, CUDA-event fenced) and aggregate
 results/s. CSV rows in the house grid convention:
-    content,N,frames,n_results,wall_s,pre_ms,infer_ms,post_ms,e2e_ms
+    content,N,frames,n_results,wall_s,pre_ms,infer_ms,post_ms,e2e_ms,steady_fps
 
-Deps (resolved at bench time, NEVER installed into the shared Python-dev
+Deps (resolved at bench time, NEVER installed into the shared host
 env - see the campaign plan): python with `tensorrt`, `PyNvVideoCodec`,
 `torch`, `torchvision`, `numpy`. The DS/TRT containers ship `tensorrt`
 for their system python; `pip install pynvvideocodec` adds decode; torch
@@ -36,6 +36,7 @@ import torchvision
 import PyNvVideoCodec as nvc
 
 SCORE_THRESH = 0.4
+WARMUP = 60  # frames per stream discarded from the steady-state rate (same as the DeepStream parser)
 IOU_THRESH = 0.45
 SIZE = 640  # same production values as the PyCamTRT side
 
@@ -125,6 +126,7 @@ def stream_worker(url, engine_path, frames, stats, idx):
     n = dets = 0
     pre_ms = inf_ms = post_ms = 0.0
     t0 = time.time()
+    t_warm = None   # wall time at frame WARMUP: steady-state rate excludes stream open + engine load
 
     def frame_iter():
         pd = nvc.PacketData()
@@ -153,12 +155,15 @@ def stream_worker(url, engine_path, frames, stats, idx):
         inf_ms += ev[1].elapsed_time(ev[2])
         post_ms += ev[2].elapsed_time(ev[3])
         n += 1
+        if n == WARMUP:
+            t_warm = time.time()
         if n >= frames:
             break
     wall = time.time() - t0
     m = max(n, 1)
+    steady = (n - WARMUP) / (time.time() - t_warm) if t_warm and n > WARMUP else 0.0
     stats[idx] = dict(n=n, dets=dets, wall=wall, pre=pre_ms / m,
-                      inf=inf_ms / m, post=post_ms / m)
+                      inf=inf_ms / m, post=post_ms / m, steady=steady)
 
 
 def main():
@@ -185,9 +190,10 @@ def main():
             pre = sum(s["pre"] for s in ok) / max(len(ok), 1)
             inf = sum(s["inf"] for s in ok) / max(len(ok), 1)
             post = sum(s["post"] for s in ok) / max(len(ok), 1)
+            steady = sum(s["steady"] for s in ok)   # aggregate steady-state results/s (per-stream rates summed)
             row = (f"{content},{N},{frames},{n_total},{wall:.1f},"
                    f"{pre:.3f},{inf:.3f},{post:.3f},"
-                   f"{pre + inf + post:.3f}")
+                   f"{pre + inf + post:.3f},{steady:.1f}")
             print("CELL", row, flush=True)
             f.write(row + "\n")
             f.flush()

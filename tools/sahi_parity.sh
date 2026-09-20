@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SAHI PARITY TEST — closes CORDERO limitation #7 (Reports/report 9/
+# SAHI PARITY TEST — closes research-project limitation #7 (its Reports/report 9/
 # PYCAMTRT_V0_REPORT.md §5): the pooled (cross-slot) SAHI path's design
 # comments assert it produces IDENTICAL per-slot detections to the serial
 # (per-slot tile loop) path — decode/NMS/merge are per-tile/per-slot
@@ -41,7 +41,7 @@ cd "$(dirname "$0")/.."
 MEDIA=${1:-tools/stream_farm/media/atlas_plate_g30.mp4}
 ENGINE=models/yolov8n_plates_b1-16_fp16_sm86.engine
 FRAMES=300
-FFMPEG="${FFMPEG:-$HOME/anaconda3/envs/Python-dev/bin/ffmpeg}"
+FFMPEG="${FFMPEG:-ffmpeg}"
 H264=_sahi_parity_media.h264
 
 if [ ! -f "$MEDIA" ]; then
@@ -70,7 +70,7 @@ fi
 # run serial, run pooled, run the plain (no --sahi) smoke check task 4
 # asks for, then diff - all inside tensorrt-dev so the host never needs
 # OpenCV/TensorRT/FFmpeg C++ dev headers (see
-# Reports/Reading_CORDERO/chapters/08_build_run.md). File source needs
+# the research project's reading manual, chapter 08_build_run). File source needs
 # neither --network host nor the RTSP farm.
 docker run --rm --gpus all \
     -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \

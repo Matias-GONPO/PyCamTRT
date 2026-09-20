@@ -49,10 +49,22 @@ public:
     static void DestroyContextLock(CUvideoctxlock ctx_lock);
 
     // `ctx_lock` must have been created (via CreateContextLock) against the
-    // CUDA context this decoder will run on. Do NOT create a separate lock
-    // per decoder when multiple decoders share one CUDA context - pass the
-    // same ctx_lock to all of them instead.
-    NvDecoder(CUvideoctxlock ctx_lock, cudaVideoCodec codec);
+    // CUDA context this decoder will run on. Give each decoder its OWN lock,
+    // exactly like NVIDIA's NvDecoder sample does per instance: one lock
+    // shared by N decoders (the design until 2026-09) serialized every
+    // submit, map and unmap across cameras, and because the map could wait
+    // on the inference stream (see output_stream below) all cameras waited
+    // with it - the full-inference ceiling was half the NVDEC wall.
+    //
+    // `output_stream`: the CUDA stream cuvidMapVideoFrame queues its
+    // post-processing on (CUVIDPROCPARAMS::output_stream). Left at 0 it is
+    // the legacy default stream, which synchronizes with every blocking
+    // stream in the context - i.e. with the TensorRT batch in flight. Pass
+    // the producer's own non-blocking stream; the caller must then only
+    // read the mapped pointer from work queued on that stream (or after
+    // synchronizing it), and must synchronize it before ReleaseFrame().
+    NvDecoder(CUvideoctxlock ctx_lock, cudaVideoCodec codec,
+              CUstream output_stream = nullptr);
     ~NvDecoder();
 
     NvDecoder(const NvDecoder&) = delete;
@@ -87,6 +99,7 @@ private:
     int HandlePictureDisplay(CUVIDPARSERDISPINFO* disp_info);
 
     CUvideoctxlock ctx_lock_ = nullptr;  // not owned - see CreateContextLock/DestroyContextLock
+    CUstream output_stream_ = nullptr;  // see ctor comment
     CUvideoparser parser_ = nullptr;
     CUvideodecoder decoder_ = nullptr;
 

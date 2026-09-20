@@ -1,4 +1,4 @@
-# SGIE: LPRNet OCR on PGIE plate crops, same ONNX as CORDERO's stage 2.
+# SGIE: LPRNet OCR on PGIE plate crops, same ONNX as PyCamTRT's stage 2.
 # Normalization parity: (pix - 127.5)/128 in BGR (LPRNet's cv2 pipeline)
 # -> net-scale-factor = 1/128, offsets 127.5, model-color-format=1 (BGR).
 # Known deviation (recorded): no --noTF32 equivalent in nvinfer; TF32 stays

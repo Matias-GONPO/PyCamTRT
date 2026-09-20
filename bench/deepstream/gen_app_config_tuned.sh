@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Latency-tuned deepstream-app config generator. Differences from
 # gen_app_config.sh (the idiomatic-default generator):
-#   - fp16 GIEs (network-mode=2) — matches CORDERO's fp16 stage-1, the
+#   - fp16 GIEs (network-mode=2) — matches PyCamTRT's fp16 stage-1, the
 #     single biggest latency lever (halves inference).
 #   - streammux batched-push-timeout 5 ms (was 33 ms) — closes partial
 #     batches sooner; helps low-N latency, harmless at N=16 where a full

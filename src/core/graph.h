@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-namespace cordero {
+namespace pycamtrt {
 
 // Select (R1, v0.2.0): a declarative DETECTION FILTER between a detector's
 // Postprocess and a cascade child's Engine - the routing node ("send only
@@ -250,4 +250,4 @@ struct PipelineConfig {
     std::function<void(const std::string&)> log;  // nullptr => fprintf(stderr,...)
 };
 
-}  // namespace cordero
+}  // namespace pycamtrt

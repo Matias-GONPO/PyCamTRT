@@ -1,7 +1,7 @@
 // Custom nvinfer bbox parser for YOLOv8-family detect heads.
 //
 // Our own parser (benchmark decision, 2026-07-07): the [4+nc, anchors]
-// decode below is the same math the CORDERO pipeline ships in
+// decode below is the same math the PyCamTRT pipeline ships in
 // postprocess.cu and verifies bit-exact against its CPU reference —
 // third-party parser code in the benchmark's hot path would be an
 // unverified variable.

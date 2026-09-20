@@ -1,0 +1,1123 @@
+# Zero-Copy Vision — Part 3
+## The Library
+
+---
+
+**Part 3 of the Zero-Copy Vision series.** Part 1 describes the silicon-up pipeline:
+one frame, one stream, decoded and inferred without a byte crossing to host memory.
+Part 2 measures that pipeline against the world — a DeepStream head-to-head, the
+operating envelope across four resolutions, tiled inference — and produces the capacity
+atlas a fleet deployment is sized from. This part describes **pycamtrt** as it stands at
+v0.4.0: an installable, declarative Python library, `import pycamtrt`, with the C++ core
+underneath it. Every number in it was measured on the machine the README's versions
+section names, an RTX 3060 Ti, and every claim has a gate that can be re-run.
+
+---
+
+# Chapter 1 — Preface: From Pipeline to Library
+
+## 1.1 What the engine is
+
+The engine under pycamtrt is the pipeline of Part 1. A 720p H.264 stream is demuxed on
+the CPU, decoded on NVDEC straight into VRAM, preprocessed by one fused kernel, run
+through a TensorRT engine, and postprocessed on the GPU — box decode and NMS both. One
+frame closes end to end in about **2 ms**, verified bit-exact against a CPU reference.
+Multiplied into a fleet, the same design runs one producer thread per camera feeding one
+shared GPU thread and one shared CUDA context, a greedy batcher pooling frames across
+every camera, and a plate-reading cascade cropped straight out of a full-resolution
+decode ring.
+
+## 1.2 What it measures against
+
+Part 2 measured that engine against DeepStream 8.0 with a custom bounding-box parser and
+a custom CTC parser on the DeepStream side, so both systems ran the same verified decode
+math. The engine led on post-decode latency at sixteen cameras and used less VRAM. Part
+2 also mapped the operating envelope from 720p to 4K, found the limiting resource moving
+from decode silicon to memory as pixel counts grow while inference cost stays flat, and
+spent that resolution-invariance on SAHI, GPU-resident tiled inference verified against a
+planted-object CPU reference. Chapters 4 and 8 repeat the DeepStream comparison on the
+library itself, at fleet scale and on one night; where the numbers differ from Part 2's,
+the newer ones stand.
+
+## 1.3 The thesis
+
+Proving the engine competitive was the precondition, not the goal. The target is **an
+open-source, modular Python library for cascade inference over many concurrent RTSP
+streams — a DeepStream alternative.** Open where DeepStream is closed. Pythonic where
+DeepStream is GStreamer-shaped. Aimed at the same surveillance and edge workloads
+DeepStream serves, but described in a few lines of Python instead of a plugin graph and a
+config-file dialect, and usable by someone who never reads a line of the CUDA underneath.
+
+## 1.4 The governing principle, and why it cannot bend
+
+One rule sits above every design decision: **Python is the control plane, C++ is the
+data plane, and the two never blur.** Python *describes* a processing graph — which
+engines, in what order, feeding what crops to what — and the C++ core *executes* that
+graph, fused, once, at full frame rate. No Python object, function or callback is ever
+invoked on the per-frame path. Pixels are born in VRAM and stay there; only the compact
+survivors of a batch — a few dozen boxes, a handful of strings — reach Python, and only
+after the GPU has done the reducing.
+
+The reason this cannot bend is not stylistic. It is the entire measured gap between this
+library and every alternative it has been benchmarked against. A naive Python pipeline —
+OpenCV capture, torch inference, nothing exotic — measures **12.01 ms/frame** against
+the engine's 2.28, purely from ordinary Python objects sitting where the data plane sits.
+That tax is constant at one stream and stops being constant at scale: a modern
+conventional stack (OpenCV + ultralytics-ONNX + PaddleOCR + PyQt5) measures 13.6 ms at
+one stream and **87.6 ms at eight** — a 210% duty cycle, over real time — while the GPU
+underneath it sits at 40% the whole time. The wall is Python and CPU orchestration:
+per-thread model instances, a GIL, context switches, all doing at eight streams what one
+shared engine call does at sixteen. One Python callback on the per-frame path would not
+cost a constant few milliseconds; it would reproduce that collapse, because it puts the
+interpreter back where the conventional stack never left. The principle is the mechanism
+the speed advantage runs on.
+
+## 1.5 What this book covers
+
+Chapter 2 describes the two planes as pycamtrt exposes them: the declarative object API
+a user writes, and the compile step that turns it into the fused conductor the GPU thread
+runs. Chapter 3 records the design rulings behind that API and the lifecycle guarantees
+the core makes, with the defects that shaped them. Chapter 4 is the measurement: four
+opponents plus a soak. Chapter 5 is the endpoint — how data gets back out without a copy
+tax. Chapter 6 is the family system that makes the library model-agnostic. Chapter 7 is
+the capacity atlas and the planner built from it. Chapter 8 describes the decoder path,
+where the fleet ceiling is and why, and what the library measures against DeepStream on
+every dial. Chapter 9 closes with what exists, its gates, and its gaps.
+
+```
+> **Takeaway.** The library is a proof turned into an interface: three object kinds a
+> user writes, never a per-frame callback, because the callback is exactly what the
+> conventional-stack comparison shows costs 6–25x at scale.
+>
+> **Cost so far.** The numbers this chapter cites (2.28 ms, 12.01 ms naive, 87.6 ms
+> conventional-stack collapse) are the engine's; Chapter 4 checks the library against them.
+```
+
+---
+
+# Chapter 2 — The Two Planes
+
+## 2.1 The declarative API
+
+pycamtrt's Python surface is deliberately small: three generic step kinds, grouped into
+named layers, wired together by reference. `Process` is an explicit preprocess stage.
+`Engine` runs a TensorRT engine on its input. `Postprocess` decodes that engine's raw
+tensor into detections (`family="yolo"` or `"yolo-e2e"`), text (`"ctc"`), or a classifier
+label (`"argmax"`). None of these is a task class. There is no `OCR` object anywhere in
+the API — plate reading is the running example throughout this book series, never an API
+concept, because the library is model-agnostic by construction: swap the engine path and
+the family string, and the same three step kinds build a make/model classifier instead.
+
+Every step's constructor takes its input as a direct object reference — `Engine(det,
+"ocr.engine")`, not a name, not a position in a list. That reference is the **single
+source of truth** for the whole graph: execution order is derived from it (a topological
+sort), never maintained by hand alongside it. `Layer("read").add(step)` returns the step
+as a handle for later steps to point at; `layer.steps` is a read-only view in insertion
+order. When an `Engine` in one layer takes a `Postprocess` step from an earlier layer as
+its input, that cross-layer edge **auto-inserts the crop** — the Python-level expression of the C++ core's ring -> `CropParams` -> child-engine-input hop. The user never
+calls a crop function; naming the edge is enough.
+
+A minimal cascade, real syntax, unmodified from the package's own docstring:
+
+```python
+import pycamtrt
+
+streams = pycamtrt.Streams(["rtsp://cam1", "rtsp://cam2"])
+L1 = pycamtrt.Layer("detect")
+eng = L1.add(pycamtrt.Engine(streams, "yolov8n_b1-16_fp32_sm86.engine"))
+det = L1.add(pycamtrt.Postprocess(eng, family="yolo", score=0.4, iou=0.45))
+
+L2 = pycamtrt.Layer("read")
+eng2 = L2.add(pycamtrt.Engine(det, "ocr.engine"))     # edge => auto-crop
+txt = L2.add(pycamtrt.Postprocess(eng2, family="ctc"))
+
+with pycamtrt.Pipeline(streams, layers=[L1, L2]) as pipe:
+    for r in pipe:
+        print(r.stream_id, r.frame_no, r.outputs["read"])
+```
+
+Six lines describe a two-model cascade across two cameras. None of them decodes a
+frame, moves a pixel, or crops an image — that is the C++ side's job, and it starts only
+when `Pipeline` compiles this object graph.
+
+## 2.2 From object graph to fused conductor
+
+```
+ Python object graph        index graph               ExecPlan            fused conductor
+ Streams / Layer / Step  ->  StepDesc / LayerDesc   ->  Validate()      ->   Batcher, Nv12Ring,
+ (dataflow references,      (PipelineConfig, plain     (pipeline.cpp:      producers, GPU
+  held by identity)          integer indices)           shape check,       loop, SAHI, cascade
+                                                         resolves norm/     (moved verbatim
+                                                         color defaults)    Chapter 8)
+```
+
+`Pipeline.__init__` walks every layer's steps in insertion order, keyed by Python object
+identity: the `Streams` object is seeded into that identity map as index `-1` (the C++
+convention for "raw stream source"), and every step compiles into a `StepDesc` whose
+`input` field is another step's already-compiled index. A step referring to an object not
+yet seen in the graph — added out of dependency order — fails immediately with a
+`ValueError`, in Python, before any C++ is touched. That is the index graph: the same
+dataflow the user wrote, now flattened to integers a C++ struct can hold.
+
+Construction of the extension module's `_c.Pipeline(cfg)` is where the two planes meet.
+Under a released GIL, the C++ side loads and warms up every engine, then calls
+`Validate(cfg)` (`pipeline.cpp`) — a function that both checks and returns an
+`ExecPlan`: the one shape, out of everything the generic graph *could* describe, that
+the executor actually knows how to run. That shape is a depth-2 tree — one
+`Engine -> Postprocess("yolo"|"yolo-e2e")` root, optionally tiled by SAHI, feeding any
+number of sibling recognition layers, each its own `Engine -> Postprocess("ctc"|"argmax")`
+cropping the same root. `Validate()` resolves per-layer norm/color defaults into that
+plan, and only then does the fused conductor — the same `Batcher`, refcounted `Nv12Ring`,
+producer threads, and GPU loop that Chapter 8 walks through frame by frame — start
+running it.
+
+## 2.3 Honest rejection
+
+Every shape the generic API can *express* but the executor cannot *run* is rejected
+by name, not silently reinterpreted. An unrecognized `family=` string raises
+`ValueError` listing every valid one. Feeding one recognition layer's own `Postprocess`
+output into another `Engine` — chaining a child off a child, rather than two siblings
+off the same root — is accepted at the Python level (the object graph has no opinion)
+and rejected by `Validate()` with a named `RuntimeError`: *"v1 executor supports a
+depth-2 tree: one detector layer feeding sibling recognition layers; chained cascades
+(a child of a child) are not yet executable."* Attaching SAHI to a cascade layer instead
+of the detector layer raises its own named error the same way. The rule is consistent
+across all three: a shape the API can describe but the executor cannot run fails loudly,
+at construction, in a sentence naming exactly what was asked for and why it does not fit —
+never a silent fallback to some other behavior.
+
+## 2.4 The result path
+
+Once started, the GPU thread emits one `FrameResult` per completed frame into a bounded
+queue — capacity 256 by default (`queue_capacity`), `backpressure="block"` unless the
+user opts into `"drop_oldest"` (with `dropped_results()` reporting evictions). Python's
+`for r in pipe:` calls `poll(500)` in a loop, timeout in milliseconds, GIL released for
+the wait so Ctrl-C and other threads stay responsive; a timeout just loops back around
+rather than raising. Every result carries the same three-way latency split a
+`Sink(kind="events")` line mirrors verbatim into its NDJSON: `ms_pre` (pop-to-ready),
+`ms_queue` (ready-to-take), `ms_gpu` (take-to-done) — attached to every result a consumer
+ever sees, whether that consumer is a Python `for` loop or a TCP socket. Chapter 8 says
+exactly where each clock starts and stops.
+
+```
+> **Takeaway.** Two planes meet at exactly one seam: the `ExecPlan` `Validate()` returns
+> at construction. Above the seam is Python objects and identity-keyed dictionaries;
+> below it is the fused conductor, and no per-frame call ever crosses back over.
+>
+> **Cost so far.** One compile pass at construction time (engine load + warmup, done
+> once); zero Python calls per frame afterward. The result queue holds 256 `FrameResult`s
+> by default before backpressure engages.
+```
+
+---
+
+# Chapter 3 — Design Rulings and the Lessons Behind Them
+
+## 3.1 The API rulings, and the linked list that was rejected
+
+The API's shape was settled by explicit ruling before any binding code existed, and the
+rulings still describe it. Package name `pycamtrt`; the core keeps its own identity
+(`pycamtrt_core`). Generic stages, not task classes — "OCR" is an example throughout this
+book, never an API concept. Dataflow references as the single source of truth;
+`Layer.add(step)` returns a handle; `layer.steps` is read-only.
+
+One alternative was rejected and the reason is part of the design: a linked-list API,
+`step[i]` with step `i`'s input implicitly step `i-1`. It fails on two counts. It creates
+two sources of truth — a step's position in the list and its actual data dependency —
+that must be kept in agreement by hand forever, exactly the duplication the
+reference-based design exists to avoid. And a linear chain cannot express a tree: the
+moment two recognition layers must crop the *same* detector output — a plate reader and
+a make/model classifier both reading one root, which is what Chapter 6's sibling
+children do — a chain has no syntax for two steps sharing a parent. Explicit
+`input=<step>` references solve both for free: order is derived by topological sort, and
+a tree is two steps pointing at the same upstream object.
+
+## 3.2 The core as a library, and what gates catch that compilers cannot
+
+`src/core/{graph.h, result.h, pipeline.h, pipeline.cpp}` hold the step-graph
+`PipelineConfig`, `FrameResult` and `pycamtrt::Pipeline`. The conductor — `Batcher`,
+the refcounted `Nv12Ring`, producer threads, the GPU loop, SAHI serial and pooled, the
+OCR cascade, `--verify` — is the engine's, moved into the library unchanged, explanatory
+comments included. `Validate()` maps the generic graph onto the executor and rejects
+anything else by name. The reference CLI, `rtsp_infer_multi`, is written on top of the
+same library and the same graph API a Python user writes, with identical output; the
+atlas of Chapter 7 drives that binary.
+
+The house rule the whole project runs on was learned when that CLI was first rewritten
+on the library: it compiled cleanly, linked cleanly, and hung, because it built the
+graph, polled in a loop, and never called `Start()` — perfectly well-typed, and no
+compiler could object. Only the gate caught it: a `--verify` run against 400 reference
+frames that simply never produced one. **The checkpoint gates catch what compilation
+cannot**, and nothing in this library ships without one.
+
+## 3.3 Lifecycle guarantees
+
+Every construct, start, poll and stop ordering a user can hit — including the
+adversarial ones — has a defined behavior, and each was a real defect before it became a
+guarantee:
+
+- A constructor that throws leaks nothing: partial allocations are released on the
+  throwing path, where a destructor never runs.
+- Concurrent `Stop()` calls are safe: the losing thread blocks on `stop_seq_complete`
+  until the winner's joins have finished, so no destructor can free CUDA state mid-join.
+- `Start()` after `Stop()` raises instead of spawning threads nobody would join, which
+  crashed via `std::terminate`.
+- The stream-info statistics cache is safe under concurrent readers and writers.
+
+`pipeline_api_test` is the gate: a construct → start → consume → stop matrix across every
+teardown variant (double-`Stop`, destructor-only, poll before `Start`), a hang watchdog,
+and a VRAM-growth detector, run for five to twenty cycles with zero growth. The reconnect
+gate matters most for a network-facing library: kill and restart a live stream mid-run.
+The producer backs off from 250 ms to a 5 s cap, retries, catches up, and the run closes
+with `reconnects=1, failed=0` on the affected stream and zero non-monotonic timestamps on
+every stream that was never touched.
+
+## 3.4 The binding
+
+`_pycamtrt`, a small pybind11 module, is thin on purpose. The GIL is released around
+every blocking C++ call — constructor, `start`, `poll`, `stop` — so a Python thread never
+holds the interpreter while a GPU thread warms an engine or a producer blocks on a
+socket. A log-callback trampoline is the one place that acquires the GIL deliberately,
+routing any exception raised inside a user's `log=` callback to `sys.unraisablehook`
+rather than letting it escape into C++. `python/pycamtrt/__init__.py` is the declarative
+API plus the object-graph-to-index-graph compiler of Chapter 2.
+
+One rule of the binding exists because of a deadlock. Garbage-collecting an unstopped
+`Pipeline` with a Python `log=` callback attached deadlocked: pybind11 runs the C++
+destructor **under the GIL**, a worker thread could at that moment be blocked
+*acquiring* the GIL inside the trampoline, and the destructor's joins then waited on a
+worker that could never proceed. The object's `__del__` therefore calls the GIL-releasing
+`stop()` before the C++ destructor can run, so every worker is joined — and no callback
+can be mid-flight — before anything executes under the GIL. The gate: a live SIGINT
+mid-stream with a real Python callback attached exits with status 0, no hang.
+
+## 3.5 Born-verified parity
+
+`examples/read_plates/read_plates.py` is the program the library exists for: an fp16
+plate detector feeding an LPRNet cascade, live plate prints and a run summary, with a
+`--verify` mode. The parity gate runs the C++ CLI and the Python library against
+identical engines and identical content and compares outputs: the dominant plate string
+is identical from both, plates per frame 1.00 against 1.00, and the Python side's own
+`verify=True` closes at 600/600. The library agrees with the reference implementation it
+wraps, and the gate that says so is re-run on every change to the core.
+
+## 3.6 Five defects the gates caught
+
+| # | Where | Defect | Severity | Rule that came out of it |
+|---|---|---|---|---|
+| 1 | `Nv12Ring` | A ring slot could be overwritten while a queued batch still referenced it, letting a crop come from a frame newer than its own detections | Correctness (silent) | Per-slot `in_use` refcount; ring slot acquired before the batch slot; `Ensure()` waits for all-free before reallocating |
+| 2 | Reference CLI | Never called `Start()`; compiled clean, hung forever on poll timeouts | Blocker | Gates, not compilers, decide when something works |
+| 3 | Core `Stop()` | Concurrent stops could let a destructor free CUDA state mid-join | Use-after-free | Losers block until full quiescence |
+| 4 | Core `Start()` | `Start()` after `Stop()` spawned threads nobody joined | Crash | `stop_requested` guard raises instead |
+| 5 | Python wrapper | GC of an unstopped pipeline with a `log=` callback deadlocked destructor and trampoline on the GIL | Deadlock | `__del__` stops before the destructor runs |
+
+A sixth belongs with Chapter 8: a map that waited on the inference stream, which no gate
+here could see because every gate ran below the camera count where it bit.
+
+```
+> **Takeaway.** None of the defects that shaped the library was an algorithm mistake.
+> Every one was ownership, lifecycle, or Python-object-model correctness, surfacing once a
+> verified C++ core had to live under a garbage collector and a GIL — and every one is now
+> a guarantee with a gate.
+>
+> **Cost so far.** Zero Python calls per frame; a compile pass at construction; a
+> lifecycle matrix and a reconnect gate that close at zero growth and zero failures.
+```
+
+---
+
+# Chapter 4 — The Proof
+
+Four comparisons, four different opponents, plus a soak, establish what the library
+holds against and where it stops.
+
+## 4.1 Against a naive Python baseline
+
+Naive OpenCV-plus-torch, one process per camera, no batching, no shared context: 12.01
+ms/frame, next to the engine's 2.28 ms — a more than 5x gap, and the floor every other
+comparison in this chapter sits above. Memory shows the sharper version of the same
+architectural difference: the naive design scales RAM roughly
+linearly, about **1.3 GB per stream**, because every camera is its own process with its
+own model copy. pycamtrt's fleet shares one CUDA context and one engine across every
+camera; the marginal cost of one more stream is a decode surface and a batch slot, not a
+model — measured at roughly **+20 MiB** per added camera.
+
+## 4.2 Against the rebuilt modern conventional stack
+
+`Python-RTSP/cascade_baseline.py`: OpenCV RTSP capture, ultralytics ONNX plate detection
+(verified GPU via onnxruntime CUDA), PaddleOCR 3.7, optional PyQt5 rendering — modern
+versions, deliberately untuned but competent, run on the same farm and the same plate
+content as pycamtrt.
+
+| Streams | Conventional stack | pycamtrt | Factor |
+|---|---|---|---|
+| 1 | 13.62 ms (33% duty @ 24 fps) | 2.24 ms | 6.1x |
+| 4 | 42.87 ms (**103% duty — over real time**) | 2.57 ms | 16.7x |
+| 8 | 87.63 ms (210% duty) | 3.45 ms | 25x |
+
+The shape, not just the numbers, is the finding: the conventional stack's aggregate
+throughput **plateaus around 86 fps** — going from 4 to 8 streams bought zero additional
+throughput, only doubled latency — while the GPU underneath it sits flat at roughly 40%
+utilization the entire time. The wall is Python and CPU orchestration (sixteen
+per-thread model instances oversubscribing the host), not compute. pycamtrt holds the full
+offered rate at every stream count measured, with the GPU as the only limit in sight.
+Memory shows the same shape: 4.1 GB RAM / 2.5 GB VRAM at eight streams for the
+conventional stack versus roughly 0.5 GB RAM / 1 GB VRAM at sixteen for pycamtrt; a
+marginal camera cost the conventional stack about +200 MB RAM and +240 MiB VRAM against
+pycamtrt's ~+20 MiB.
+
+The conventional stack is built honestly — not a strawman, real production libraries at
+current versions — and each of the costs of doing so is a finding in its own right:
+
+| # | Finding |
+|---|---|
+| 1 | Paddle's pip install silently broke torch, twice (dependency clobbering) |
+| 2 | Stable `paddlepaddle-gpu` 3.0 cannot run PaddleOCR 3.7's models — nightly required |
+| 3 | `onnxruntime` silently falls back to CPU without `LD_LIBRARY_PATH` surgery |
+| 4 | `ultralytics` serializes all inference threads through one lock |
+| 5 | PaddleOCR's recognizer silently returned another thread's answer 21% of the time under shared use |
+| 6 | PyQt5 + paddle crash on the wrong import order |
+| 7 | +5.6 GB of dependencies pulled in |
+| 8 | Both stacks read 100% of plates, but PaddleOCR's string flickers frame-to-frame where LPRNet's fixed-format decode holds steady |
+
+## 4.3 Against DeepStream 8.0
+
+Measured on one night, same clip, same farm, same hour, every frame of every camera
+decoded and inferred at 30 fps, the plate cascade on both sides, DeepStream tuned per
+NVIDIA's latency guidance (fp16 engines, 5 ms batch timeout, 30 ms jitter buffer):
+
+| held at ≥95% of the offered rate | pycamtrt | DeepStream tuned fp16 | DeepStream default fp32 |
+|---|---|---|---|
+| 720p | 48 cameras (end of grid), 9.3 ms | 48, 12.7 ms | 24, 63 ms |
+| 1080p | 24, 3.3 ms | 24, 10.2 ms | 24, 82 ms |
+| 4K | 6, 1.8 ms | 6, 8.6 ms | 6, 17.9 ms |
+
+Post-decode latency at every count where both hold, pycamtrt against tuned DeepStream:
+720p 2.8 / 3.4 / 4.6 / 6.0 / 9.3 ms against 8.1 / 8.1 / 8.6 / 11.5 / 12.7 at 16 through 48
+cameras; 1080p 2.5 / 2.7 / 3.0 / 3.3 against 8.3 / 8.3 / 8.3 / 10.2 at 8 through 24; 4K
+1.9 / 1.9 / 1.8 against 5.7 / 8.4 / 8.6 at 2 through 6. The two are equal with one camera,
+where inference alone sets the number; two to four times apart below the wall; and equal
+again on the wall, where both queue at whatever rate the decoder allows. Chapter 8
+explains the mechanism and shows that on every dial setting the two hold the same number
+of cameras — the ceiling is the silicon, and the difference is how long a frame waits
+below it. VRAM at fp16 and sixteen cameras: about 10% leaner than DeepStream.
+
+## 4.4 The pycamtrt scaling curve
+
+The full sweep of the Python binding itself, not the underlying C++ CLI:
+
+```
+  1 stream  : 2.24 ms
+  4 streams : 2.57 ms
+  8 streams : 3.45 ms
+ 16 streams : 4.77 ms   (both sinks attached: events + live RTSP relay)
+```
+
+At sixteen streams the binding held **419.1 results/s — exactly the full offered rate**
+— with the events sink delivering 4,800 of 4,800 expected NDJSON lines and zero drops.
+The curve is flat and shallow: latency roughly doubles from 1 to 16 streams while a
+conventional stack's latency at just 4 to 8 streams already doubles on its own with zero
+throughput gain (§4.2). The control-plane/data-plane split — Python describing, C++
+executing — holds all the way to fleet scale, sinks included.
+
+## 4.5 The soak
+
+Sixteen streams, both sinks attached, `skip=2`, run for 3.5 hours (12,602 s):
+
+| Gate | Result |
+|---|---|
+| Throughput | **3,023,750 results at 239.9/s — exactly the offered rate**, every minute of 3.5 h |
+| Memory drift | RSS varied 827->830 MB — a **3 MB band** across the entire run; VRAM flat ~1.68 GB after warmup |
+| Delivery accounting | events == results exactly (3,023,750 = 3,023,750); `sink_dropped=0`, `dropped_results=0` |
+| Stream health | `reconnects=0`, `failed=0` across all 16 streams |
+| Relay consumability | 14/14 quarter-hourly ffprobe checks returned valid h264/1280 |
+| Clean stop | exit 0, full teardown, GPU idle after |
+
+Three million results, zero dropped events, zero drift worth measuring — the endpoint
+capability and the library underneath it are soak-proven at fleet scale, not just proven
+on a five-minute run.
+
+## 4.6 Honest framing
+
+pycamtrt is faster than every alternative it has been measured against at the one job
+all four comparisons test: RTSP in, cascade inference out, at low and flat latency. It
+holds as many cameras as DeepStream's tuned configuration and no more, because both stop
+at the hardware decoder. It is not feature-complete against the DeepStream suite. There
+is no tracker — a skipped frame carries no interpolated boxes, only the next inferred
+frame's fresh ones. There is no annotated-video endpoint — `Sink` forwards raw compressed
+video or NDJSON metadata, never drawn pixels; that is NVENC work already scoped. Tier-2/3
+frame access (`hold_frames=True`) is treated as experimental: an exit-time crash seen in
+earlier internal builds has not reproduced across the lifecycle gates since, but its
+write site was never localized. Packaging is `pip install .` from source inside the
+documented container, not a wheel. None of these change what this chapter's numbers say
+about the core task; they are the honest list of what "not a DeepStream replacement yet,
+but faster at what it does" means in practice.
+
+```
+> **Takeaway.** Four opponents, four different angles, one shape: pycamtrt holds a flat
+> 2–5 ms band from 1 to 16 streams while naive Python, a modern conventional stack, and
+> tuned DeepStream each cost more, scale worse, or both; at fleet scale it holds the same
+> cameras as tuned DeepStream at a third of the latency. The soak turns that into a claim
+> about hours, not one lucky run.
+>
+> **Cost so far.** 2.24->4.77 ms across 1->16 streams (sinks on at 16); 3,023,750 soaked
+> results, 0 drops, a 3 MB RSS band over 3.5 h; 2–4x lower latency and ~10% less VRAM than tuned
+> DeepStream below the wall; 6.1–25x ahead of the conventional stack at 1–8 streams.
+```
+
+# Chapter 5 — The Endpoint
+
+## 5.1 The insight
+
+The pipeline keeps pixels off the CPU: NVDEC
+decodes into VRAM, a fused kernel writes straight into the inference
+binding, nothing round-trips through host RAM on the per-frame path.
+Getting video *back out* looks at first like it should break that rule
+— decode, draw, re-encode, copy down. It doesn't. The compressed
+frame already crosses host RAM once, for free, before NVDEC ever touches
+it: `FFmpegDemuxer` hands packets to the producer thread on the CPU side
+of the boundary, and `Decode()` is called on that same memory. Forwarding
+the *original* video downstream costs nothing new — no re-encode, no
+device-to-host copy — because the bytes were already there.
+
+## 5.2 The PacketRing
+
+`src/core/packet_ring.h` gives each stream a host-side ring of its last
+`ring_seconds` of demuxed packets (default 10 s, ≈2.4 MB/stream at
+720p). The producer thread memcpy's each packet into the ring *before*
+calling `Decode()`, so the ring never depends on decode succeeding. Two
+properties make it useful rather than just cheap: it's keyframe-anchored
+(replay from any point in the ring starts at a real IDR, so it's always
+decodable) and PTS-indexed (so a ring position lines up with the
+detection that came from that same frame). `ring_seconds=0` disables the
+ring entirely — no allocation cost paid for a pipeline that never needs
+it.
+
+## 5.3 Sinks: tees that cannot backpressure
+
+A `Sink` is a tap on the graph, not a stage in it. Each sink drains
+through its own bounded, drop-oldest queue on a dedicated thread — a
+stalled consumer loses its *own* oldest data (`sink_dropped()` counts
+it) and never slows the pipeline that produced it. Three things flow out
+this way:
+
+```
+   producer -> ring (packets) --------> Sink(kind="stream")  -> RTSP relay
+       |                                Pipeline.clip()      -> .h264 file
+       v
+   GPU thread -> FrameResult -------->  Sink(kind="events")  -> NDJSON
+```
+
+`kind="events"` emits one NDJSON line per `FrameResult` (stream, frame,
+pts, boxes, texts, the pre/queue/gpu latency split, a printable
+`frame_addr`) to `tcp://`, `file://`, or `stdout`. `kind="stream"`
+republishes the *original* compressed H.264 live, `-c copy` semantics
+through mediamtx — a real muxer, no re-encode anywhere. A relay's first
+connection replays the ring's history at real-time pace before going
+live, so a viewer who joins mid-run gets continuous context instead of a
+jump to "now." `pipe.clip(stream, seconds_back, path)` pulls the same
+ring into a pre-roll `.h264` file, snapshot-and-`fwrite`, no sink
+required.
+
+Two restrictions are deliberate, not oversights. One relay sink
+serves exactly one concrete stream — one RTSP path is one camera;
+multiplexing several onto one path has no defined behavior, so `stream=`
+is required, not optional, for `kind="stream"`. And the events format
+string is built only when an events sink actually exists — a pipeline
+that never configures one pays nothing for the formatting code sitting
+in the binary. Because RTSP-fed packets already arrive Annex-B, the framing `NvDecoder`
+expects, clip files are plain writes with no re-framing step; the
+demuxer handles the AVCC framing of MP4 file inputs itself.
+
+## 5.4 The answer table
+
+The question the endpoint answers is simple: does sending frames
+back out require compressing them again?
+
+| Output | Re-encode needed? | Mechanism |
+|---|---|---|
+| Original video | **No** | PacketRing relay, `-c copy` |
+| Annotated video | **Yes** | pixels exist only in VRAM — the NVENC sink, not yet built |
+| Metadata (events) | No | already compact, formatted once on the GPU thread |
+
+Annotated video is the one case that can't dodge a re-encode: once boxes
+are drawn onto the frame, that frame exists only as pixels in VRAM, and
+getting compressed bytes back out means running an encoder. That sink
+doesn't exist yet; the `Sink` graph node built here is the base it will
+attach to.
+
+## 5.5 Measured: zero cost, at scale and over time
+
+A 15-cell grid (N ∈ {4, 8, 16} × {off, ring, events, stream, both})
+measured end-to-end latency with every sink combination on, gated at
+≤5% overhead and zero drops:
+
+```
+        off      ring     events   stream   both
+  N=4   2.748ms  2.811    2.755    2.706    2.741
+  N=8   3.323    3.284    3.254    3.244    3.254
+  N=16  4.278    4.338    4.359    4.164    4.040
+```
+
+Every delta sits inside the ±5–10% run-to-run noise band — several sink
+cells measured *below* their own `off` sibling — and sink drops were
+zero in all 15 cells. All five predictions stated before the grid ran hold. At
+fleet scale with both sinks attached, 16 streams: 419.1 results/s (the full offered rate) at 4.77 ms end-to-end,
+4800/4800 events delivered, 0 dropped. That 4.77 ms sits exactly on the
+Python binding's own established scaling curve with no sinks at all —
+1 stream: 2.24 ms, 4: 2.57, 8: 3.45, 16: 4.77 — so turning both sinks on
+did not add a new point to that curve, it landed on the one already
+there.
+
+The soak of §4.5 pushes past a single grid: 16 streams, both sinks,
+12,602 s (3.5 h). 3,023,750 results at exactly the offered rate
+(239.9/s) every single minute; RSS held in an 827→830 MB band; events
+delivered exactly matched results delivered (3,023,750 = 3,023,750,
+`sink_dropped=0`); all 14 quarter-hourly relay probes came back
+decodable h264. Three million results, zero dropped events, no drift —
+the endpoint is soak-proven, not just grid-proven.
+
+> **Takeaway.** The endpoint costs nothing because it is designed around
+> a fact already true of the pipeline — compressed packets already sit
+> in host RAM — rather than adding a new copy to move them. Fifteen
+> grid cells and a 3.5-hour, 3-million-result soak put the sink cost
+> indistinguishable from zero.
+
+---
+
+# Chapter 6 — Any Model, Any Tree
+
+## 6.1 Norm and color: a scalar becomes per-channel
+
+Every `Engine` step applies `(pixel[c] + offset[c]) * scale[c]` before
+its model sees a frame, inside the fused preprocess kernel. The knob is
+per-channel, `((o0,o1,o2), (s0,s1,s2))` (a scalar pair broadcasts to all
+three), with a load-bearing convention: index 0/1/2 mean the first/second/third channel *in this
+engine's own channel order* — whatever `color="rgb"` or `color="bgr"`
+says it is. That convention is what lets a user copy a model's published
+mean/std directly: torchvision states ImageNet's mean as
+`[0.485, 0.456, 0.406]`, RGB-ordered, which converts to this knob as
+`offset[c] = -mean[c]*255`, `scale[c] = 1/(std[c]*255)` — no manual
+reordering. `norm=None` inherits the per-position defaults
+(layer 0: `(0, 1/255)`; layer 1: `(-127.5, 1/128)`), which are the values
+the plate cascade of Chapter 2 runs on.
+
+## 6.2 Four families, one contract
+
+`src/postprocess.h`'s own top-of-file comment states the design: "a
+plain launch function, caller owns every device buffer, everything
+async on the caller's stream... a different model family gets a sibling
+launcher next to this one, not a plugin framework." Four families honor
+that contract:
+
+| Family | Role | Decode work |
+|---|---|---|
+| `yolo` | layer-0 detector | anchor decode + NMS |
+| `yolo-e2e` | layer-0 detector | none — model emits resolved boxes |
+| `ctc` | cascade child | greedy CTC decode (OCR) |
+| `argmax` | cascade child | plain max-logit scan, no softmax |
+
+`argmax` is also the template: a classifier postprocess simple enough (one
+thread per batch row, sequential scan, no probability normalization) to
+be the worked example for anyone adding a fifth.
+
+## 6.3 The recipe
+
+`manual/ADDING_A_FAMILY.md` turns Argmax's seven touch points — kernel +
+launcher, the `Family` enum, graph acceptance, the `GpuLoop` branch, the
+result field, the Python `_FAMILIES` entry, and the bit-exact checkpoint
+— into a walkthrough anyone can follow without reading the whole
+codebase. Its §5 addendum covers what a layer-0 *detector* family needs
+beyond a layer-1 cascade child, and it exists because the recipe was
+followed cold to build `yolo-e2e`: an `ExecPlan::l0_family` field, both
+layer-0 acceptance forms widened to the new family, an explicit SAHI
+ruling (no NMS means no defined cross-tile merge, so SAHI is rejected by
+name), a different branch point in `GpuLoop` (Stage 1, not the cascade
+block), and a checkpoint that canonicalizes its own ordering before a
+bit-exact compare means anything. A recipe that has been used is a
+better recipe than one that has only been reread.
+
+## 6.4 yolo-e2e: detection without NMS
+
+yolo26n, a COCO-pretrained general detector, exports to an output layout
+of `[batch, 300, 6]` — `[x1, y1, x2, y2, score, class_id]`, already sorted
+by score, already class-resolved, with zero `NonMaxSuppression` nodes in
+the ONNX graph (checked three independent ways: `onnx.load`,
+`onnxruntime` against Ultralytics' own decode, and `trtexec`'s binding
+dump). That is end-to-end, NMS-free detection architecturally, not a
+yolov8 head that merely exports oddly, and the house rule — a different
+family gets a sibling, not a hack — makes it a family of its own. The
+`yolo` family is untouched; `yolo-e2e` is genuinely *simpler* than
+`yolo`: no anchor decode, no NMS kernel, just a score threshold over 300
+pre-sorted rows and an un-letterbox.
+
+## 6.5 The depth-2 tree
+
+One detector root feeds N sibling recognition children — any mix
+of `ctc`/`argmax` — each cropping the *same* root detections, never each
+other's output:
+
+```
+                    +--> read      (ctc)     -> texts
+  detect (yolo) ----+
+                    +--> classify  (argmax)  -> (label, score)
+```
+
+`examples/read_and_classify/read_and_classify.py` is exactly this: one plate detector,
+LPRNet OCR and a mobilenet classifier as unmodified siblings — proof the
+generalization is additive, since neither single-child cascade had to
+change. The back-compat rule matters here: `r.texts`/`r.labels` (the
+pre-tree fields) must equal exactly the first matching-family child's
+output, not some merge of all of them. The tree-parity gate checks
+something stronger than alignment: run the tree once, then run `read`
+alone and `classify` alone as their own two-layer pipelines against the
+same farm content, and the tree's dominant plate string must equal the
+read-only run's, and the tree's top argmax label must equal the
+classify-only run's. Two independent single-purpose pipelines and one
+three-model tree, agreeing, is the actual claim being tested.
+
+## 6.6 The classifier-parity gate
+
+The classifier cascade demo runs cleanly — alignment is never in
+question — but its independent-recompute gate is not a flat agreement
+bar, and the reason is the content. This demo's frames sit almost
+entirely on a near-tied decision between two of 1000 ImageNet classes
+("digital clock" vs. "street sign"): every disagreement between the
+pipeline and an independent torch/cv2 reference has a small logit margin
+(0.003–0.098), while every confident case (margin above about 0.15)
+matches with no exceptions. A fixed agreement threshold or a fixed
+margin threshold turns into whack-a-mole against such content — a
+boundary-parked detection flips at margins past 0.5 depending on the
+run. The gate that holds is a **logit-gap invariant**: a disagreement is
+acceptable only if the reference itself scored that class within 1.0
+logit of its own top pick — a boundary flip between two legitimate
+resizers, not a mechanics bug — plus a 60% agreement floor. With true
+per-channel ImageNet normalization (§6.1) raw agreement measures 78–98%
+on this content, and the underlying 919-vs-530 tie remains, smaller but
+present, which is exactly why the gate measures the margin and not a
+percentage. Two harness rules come with it: held frames are always
+released (a producer that waits on one hangs), and a crop rect is the
+sum of two independently rounded values, never the rounding of a sum.
+
+> **Takeaway.** Generality comes from a contract that keeps the same
+> seven-touch-point shape for a fourth family (argmax), a fifth
+> (yolo-e2e), and a tree of siblings on top of both — and from a parity
+> gate that measures the right thing (a near-tied margin, not an
+> arbitrary bar) where the data shows *why* two implementations disagree.
+
+---
+
+# Chapter 7 — Making an Atlas
+
+## 7.1 Capacity as a function, latency as its outcome
+
+Chapter 5's sinks answer "can data get out without a copy tax." A
+different, older question sits underneath everything the endpoint feeds:
+how many cameras can this actually hold, at what settings, before
+something gives? The project's whole capacity model compresses into one
+line: capacity = f(stream count × decode rate × inference rate); latency
+is what falls out of that, not a fourth dial. `recommend()`'s two load equations make
+this literal — decode load is `streams × decode_fps_per_stream`,
+inference load is that same number divided again by `skip` — because
+decode and inference are independent axes: NVDEC can decode a frame
+nobody infers on, and `skip` only ever throttles the second number.
+
+## 7.2 How a campaign is run
+
+An atlas campaign is a grid, not a single benchmark: N ∈ {1, 4, 8, 16,
+32, 50, 75, 100} streams × a decode axis (all, or keyframe-only at GOP
+15/30/60/150) × an inference-skip axis (1 through 150) — roughly 42
+valid (decode, inference) combinations × 8 stream counts, about 336
+cells, 5–6 hours unattended per resolution. Every cell logs its own
+processing-time split, hold-rate, NVDEC/SM utilization, VRAM, and an
+auto-classified bottleneck, so a run produces a table a script can
+reason over, not just a folder of raw numbers. Content is real 4K plate
+footage downscaled per resolution, not synthetic.
+
+Two rules of method apply to every campaign. Every verdict is stated as a
+prediction *before* the run, and every campaign opens with a control:
+reproduce a known cell before trusting a new one (the SAHI cells
+anchor on a 1.83 ms/batch no-SAHI baseline and accept ±15%), and use a
+cell where two code paths must agree — pooled and serial SAHI are
+identical at one stream — as a check that the harness itself is sound.
+That discipline is what makes a constant regime-scoped rather than
+universal: the fixed SAHI overhead measured under keyframe-only decode
+(2.66 ms) is not the one under every-frame decode (1.09 ms serial,
+0.32 ms pooled), because the whole-frame batcher amortises it under real
+load. Chapter 8 applies the same rule to the atlas's own every-frame
+cells.
+
+## 7.3 The fitted models
+
+The constants below are the ones `_capacity.py` carries and `recommend()`
+evaluates. §8.4 says where the every-frame capacity cells they were
+fitted on differ from the current decoder path; the intercepts, the
+keyframe cells and the SAHI fits do not. No-SAHI baseline cost, fit per
+resolution (`gpu_ms ≈ a + b·load`; only the intercept is trusted — the
+slope term is noise, sign-inconsistent across resolutions):
+
+```
+  720p:  a=1.98    1080p: a=2.00    1440p: a=1.87    4k: a=2.01
+```
+
+All four land within ±0.07 ms — direct confirmation that inference cost
+is resolution-invariant, since every frame letterboxes to the same
+640×640 regardless of source size.
+
+SAHI cost, `ms/frame = a + b·T` (T = tile count):
+
+```
+  regime                       a (ms)   b (ms/tile)   R^2
+  keyframe-only decode          2.66     0.488        0.9978
+  every frame, serial (N=8)     1.094    0.482        0.9998
+  every frame, pooled (N=8)     0.323    0.498        1.0000
+```
+
+The slope is the same in every fit — tile compute cost does not depend
+on the regime. Only the fixed overhead `a` differs, and it differs by
+regime because the whole-frame batcher amortises it under every-frame
+decode.
+
+Fleet ceilings (whole-GPU frames/s, 4K, at the default tile 640 and
+three smaller tiles):
+
+```
+  tile   T    keyframe-only   every frame, serial (N=8)   every frame, pooled (N=8)
+  1280   9    ~126            186                         208  (+65% vs keyframe-only)
+  960    16   ~91             112                         121  (+33%)
+  640    33   ~53             59                          60   (+13%)
+  416    85   ~23             (not in this grid)          --
+```
+
+The shipped default (tile 640) is where pooling helps *least*
+(`floor(48/33)=1` — a pooled batch essentially never carries a second
+frame's tiles); most of the 640-row's 53→60 uplift is the decode-regime
+difference, not pooling itself. Tile 1280 is where pooling earns its
+keep, at a real recall cost the atlas doesn't measure.
+
+## 7.4 recommend(): the atlas surfaced in the API
+
+`pycamtrt.recommend(streams, resolution, fps, skip, decode, sahi=...)`
+turns every constant above into a live prediction, reasoning across
+*both* GPU-inference and NVDEC capacity at once and reporting whichever
+binds: `binding_resource` is `"gpu-inference"`, `"nvdec"`, or `"none"`
+(comfortable headroom on both), and `holds_realtime` is true only when
+both ratios clear 1.0. A worked example from its own docstring: 16
+streams, 4K, tile 640 — predicted 16.757 ms/frame against a measured
+16.8 in the every-frame SAHI cells is a **0.3% self-check**, and the call correctly
+reports `holds_realtime=False`, `suggestion='over capacity: raise skip
+to 9 / use decode="key" / ...'` — 480 offered inference fps against a
+~60 fps whole-GPU ceiling is an ~8x gap, and `math.ceil(skip *
+gpu_ratio)` says exactly 9. Every call
+carries the same honesty caveat, unconditionally, in its first note:
+every constant here was measured on one GPU (RTX 3060 Ti, sm_86); a
+different SM count or NVDEC generation needs its own atlas before these
+numbers mean anything there. `recommend()` is a seed, not a portable
+model, and it says so on every call rather than only in a docstring
+someone might not read. Its docstring also carries the calibration
+caveat §8.4 explains: above the atlas's every-frame ceilings it
+is conservative until the refit on the current decoder.
+
+## 7.5 How a user makes an atlas for their own GPU
+
+The tooling lives in `bench/atlas/`.
+
+1. **Farm.** `tools/stream_farm/farm.sh up N` with real recorded content
+   (the `atlas_<res>_g30.mp4` clips `bench/atlas/run_atlas.sh` builds) —
+   synthetic content is a known trap; the 89-cell partial run on
+   plate-over-webcam is why it's not used anymore.
+2. **Build the resolution.** `bench/atlas/run_atlas.sh <res> smoke` first
+   (one sanity cell), `mini` for the ~30-cell validation grid, then
+   `full` for the 336-cell grid — one resolution to completion before
+   starting the next; runs resume from their own `atlas.csv`.
+3. **Grid.** Let the orchestrator sweep N × decode × skip; each cell
+   writes its own row (processing splits, utilization, VRAM, bottleneck
+   label) to `atlas.csv`.
+4. **Fit.** `python3 bench/atlas/atlas_analyze.py <run>/atlas.csv`
+   turns cells into a cost model — the baseline intercept, the
+   NVDEC-utilization ceiling.
+5. **Constants.** Copy the fitted intercepts/slopes into
+   `pycamtrt._capacity`'s tables, cited inline to the analysis file they
+   came from, and re-run `qa_matrix.py` section H — its self-check
+   against a real measured cell is the same 0.3%-style anchor that
+   caught nothing wrong here, and would catch a transcription error.
+
+> **Takeaway.** An atlas is a grid run with a prediction stated before
+> every cell and a control built into every campaign — that discipline
+> is what shows a constant to be regime-scoped rather than wrong. `recommend()` is that whole
+> method compressed into one function call, with its single-GPU
+> limitation stated on every result it returns.
+
+---
+
+# Chapter 8 — The Decoder Path and the Ceiling
+
+## 8.1 How a frame reaches the batch
+
+Everything above this chapter treats decode as a solved input. This chapter walks the
+path a frame takes from the network to the detector's input tensor, because three
+details of that path decide where the fleet ceiling sits, and each is short enough to
+miss.
+
+One producer thread per camera runs the loop. It demuxes the next packet on the CPU and,
+if a relay or clip sink is configured, copies it into the packet ring of Chapter 5. It
+feeds the packet to the NVDEC parser **with the end-of-picture flag set**: every packet
+the demuxer hands over is a whole access unit, so the parser can decode it on arrival
+instead of waiting for the next packet's start code, which at a live camera would arrive
+one frame period later. The parser calls back into the same thread: "decode this
+picture", submitted to the hardware, and "picture ready", where the producer maps the
+decoded surface. The map does more than return a pointer; it runs a post-processing
+pass that turns the decoder's tiled surface into the pitch-linear NV12 buffer the next
+kernel reads, and it runs that pass **on the stream the producer names** in the map's
+parameter struct — the producer's own non-blocking, highest-priority CUDA stream, the
+same one the letterbox kernel will use, so ordering between them is plain stream order.
+Every decoder owns **its own NVDEC context lock**, as NVIDIA's decoder sample does, so a
+camera's submit, map and unmap contend with nothing but themselves.
+
+The producer then takes a slot in its camera's NV12 ring and a slot in the batch buffer
+being filled, launches the letterbox kernel straight into that slot and a full-frame copy
+into the ring slot for the cascade's crops, records an event, sleeps until both have
+finished, unmaps the surface, and marks the slot ready. Three batch buffers rotate: one
+filling, one in the GPU thread, one spare, so producers never wait for the GPU in normal
+operation. The GPU thread takes the oldest full buffer, or closes the filling buffer the
+moment anything in it is ready and waits only for slots already handed out — there is no
+batch timeout — then runs the detector, the GPU postprocess, the crops and the child
+engines, pushes one result per slot, and recycles the buffer. Under light load the
+batches are one or two frames, which is where the 2 ms comes from; under heavy load they
+grow to whatever became ready during the previous cycle.
+
+Leave out two of the three details and the library measures very differently, which is
+why they are worth spelling out. With the map's stream field left at zero, the post-processing ran on the
+legacy default stream, which waits for every earlier kernel on every blocking stream in
+the context — including the TensorRT batch in flight on the inference stream. Invisible
+at sixteen cameras, where a batch takes two milliseconds; at thirty-two, where a batch
+takes ten, every map waited for it. With one lock shared by all cameras and held during
+that map, every other camera then waited for the waiting one, the hardware decoder ran
+dry, and the GPU thread waited for the stragglers the lock released in a burst. The
+counters read half everywhere — SM 54%, decoder 52%, memory controller 43% — while the
+pipeline's own timers showed a frame waiting 38 ms between decode and result at a
+33 ms frame period. The full-inference ceiling then sits at 24 cameras at 720p and 16 at 1080p,
+half the hardware's, and neither half of the cause shows up on its own: kernel
+starvation and the lock by itself each test clean, because each is harmless without the
+other. With the stream field set and one lock per decoder the ceiling is the decoder
+itself, and a race goes with it: a letterbox kernel on a non-blocking stream never waits
+for post-processing on stream zero, and can read a surface still being written, so
+detections drift run to run. On the producer's stream they are byte-identical, and
+`bench/smoke_digest.py` is the gate that says so.
+
+The end-of-picture flag is the third detail. Measured with a timer from demuxer to pop
+that no result field covers (`PYCAMTRT_DIAG_DEMUX=1` prints it at exit), a 1080p frame at
+24 cameras spends 53 ms between leaving the demuxer and being popped without the flag and
+19 ms with it; at 720p and 48 cameras, 46
+and 10 ms. The remainder is the decoder's own queue, which grows only when NVDEC
+saturates. Letting the parser run a picture ahead per camera, the other decoder-side
+lever, buys no throughput at the wall (740 fps against 738 at 1080p) and costs the frame
+period it queues, so the parser runs with display delay zero.
+
+## 8.2 Where the ceiling is
+
+With the path as described, the fleet stops where the hardware does. The same-night
+campaign of Chapter 4 put the decoder counter on every system:
+
+| every frame at 30 fps, holds ≥95% | pycamtrt | where it stops |
+|---|---|---|
+| 720p | 48 cameras (end of the campaign grid; the atlas grid holds 50 at 11.8 ms) | decoder 97–100%, GPU 94% |
+| 1080p | 24, 3.3 ms; 28 reaches 88% | decoder 99–100% |
+| 1440p | 8, 2.0 ms; 16 reaches 86% | decoder 100% |
+| 4K | 6, 1.8 ms; 8 reaches 80% | decoder 100% |
+
+Tuned DeepStream stops at the same counts with the same counter readings: at the 1080p
+wall it decodes 715 fps to pycamtrt's 737, both at 100%, and at 4K 193 to 192. Two walls
+arrive together at 720p, the decoder at 97% and the GPU at 94%, which is why 48 to 50
+cameras is the end there for either system on this card; everywhere else the decoder
+alone is the limit. What pycamtrt keeps below the wall is the latency of Chapter 4 —
+equal at one camera, two to four times lower from a few cameras up to the wall, equal
+on it. Pop-to-ready, the producer's own share, reads 0.05 ms at every count.
+
+## 8.3 The dials against DeepStream
+
+DeepStream exposes the same two capacity dials pycamtrt does: `interval` on its primary
+engine is the skip, and `intra-decode-enable` on a source is keyframes-only. Run on the
+same grid, farm, content and hour as the validation atlas of §8.4:
+
+| cameras held, pycamtrt / DeepStream tuned | 30, 15, 10, 5, 2 inferences/s per camera, every frame decoded | keyframes only, 1/s |
+|---|---|---|
+| 720p | 50 / 50 | 100 / 100 |
+| 1080p | 16 / 16 | 100 / 100 |
+| 1440p | 8 / 8 | 75 / 75 |
+| 4K | 4 / 4 | 32 / 32 |
+
+Identical at every resolution and rate, and for a physical reason: every-frame decode
+ends where NVDEC saturates for both, and keyframe-only decode at 1440p and 4K ends where
+VRAM runs out for both. The inference dial changes GPU load — at 720p and 50 cameras
+from 94% at full rate to 18% at two inferences per second — but never capacity, on
+either side, because the decoder is the wall.
+
+What differs below the wall is how long a frame waits, and DeepStream's own component
+split says where. Its muxer holds frames until a batch of N is complete or 5 ms pass;
+with eight cameras arriving at eight phases that is 4.9 ms of waiting per frame before
+inference begins, shrinking to 1.9 ms at 32 cameras as batches fill faster. Its primary
+and secondary engines are separate elements with their own queues and threads, 3 to 6 ms
+together against pycamtrt's 2 to 3 for the same cascade. pycamtrt closes a batch the
+moment the GPU thread is free and anything is ready, and runs the cascade inside one
+thread on one stream: its queue term is 0.2 to 1.5 ms. Same silicon, same walls,
+different waiting. DeepStream's latency under its skip dial averages inferred and skipped
+frames alike, so latency is compared at full rate only; the figure in the README states
+both measurement definitions in its footnote.
+
+## 8.4 The atlas fits and the current decoder
+
+The fits behind `recommend()` (§7.3) come from an atlas measured with the map on the
+default stream and one lock shared by every decoder — the path §8.1 describes as the one
+without two of its details. That leaves the intercepts, the keyframe cells and the SAHI
+fits valid, and the every-frame capacity cells above the old ceilings conservative. A
+96-cell validation grid on the current decoder — the every-frame cells around the
+ceilings plus keyframe and single-camera anchors at all four resolutions — puts the two
+side by side; eleven cells hold on the current decoder that the fits call over capacity,
+and none goes the other way:
+
+| every frame, skip 1 | atlas fits | current decoder |
+|---|---|---|
+| 720p | 32 cameras at 61 ms | 50 at 11.8 ms |
+| 1080p | 16 | 16 (32 reaches 76%) |
+| 1440p | 8 | 8 (16 reaches 86%) |
+| 4K | 4 | 4 (8 reaches 78%) |
+
+Every keyframe cell reproduces — 100 cameras at 1080p at 99% with the decoder at 16% —
+and so does the VRAM wall at 1440p and 4K with 100 keyframe cameras. `recommend()`'s
+docstring states the consequence: above the atlas's every-frame ceilings it is
+conservative, reporting over-capacity where the current build holds, until the full
+sweep on this decoder refits it. The atlas tooling in `bench/atlas/` runs that sweep;
+`bench/atlas/atlas_vs_deepstream.py` reproduces the comparison of §8.3.
+
+## 8.5 What the ceiling teaches
+
+A utilization counter at half is a symptom of waiting, not a bottleneck. Three counters
+at 43–54% with a plateau underneath them meant the machine was idle in turns, and the only
+instrument that could say so was the pipeline's per-frame timers.
+
+A suspect cleared twice can be guilty in combination. The shared lock was harmless alone
+and the map on stream zero was harmless at sixteen cameras; together, past the point
+where a batch outlasts a frame period, they were the ceiling.
+
+Read the vendor's sample against the wrapper. The field that mattered is set in NVIDIA's
+sample, vendored in the tree.
+
+Determinism is a free gate. Hashing detections on a file found a race no accuracy check
+had, because the race never changed a count, only a decimal.
+
+Measure everything in one sitting. A DeepStream decode figure from a different night
+suggested an 8% gap that did not exist when both systems ran an hour apart.
+
+```
+> **Takeaway.** The full-inference ceiling is the hardware decoder, for pycamtrt and for
+> DeepStream alike: 48/24/6 cameras with every frame at 720p/1080p/4K, 100/100/32 with
+> keyframes only. What pycamtrt keeps is the wait below that wall — two to four times
+> shorter — and detections that are byte-identical run to run.
+>
+> **Cost so far.** Three decoder-side details — the map on the producer's stream, a lock
+> per decoder, the end-of-picture flag — and 0.05 ms of producer time per frame; capacity
+> identical to DeepStream on every dial, latency two to four times lower below the wall.
+```
+
+---
+
+# Chapter 9 — Where It Stands, What's Next
+
+## 9.1 What exists, and its gate
+
+The house rule holds without exception: nothing here is "done" without
+a gate that can be re-run.
+The table below is the whole surface, each row with the
+specific check that would fail first if the row stopped being true.
+
+| Feature | Gate |
+|---|---|
+| Endpoint sinks (events / stream relay / clip) | qa_matrix F1–F3; 3.5 h soak, 0 drops |
+| SAHI tiled inference (pooled default, serial A/B) | `tools/sahi_parity.sh`, self-controlled noise floor |
+| Families: yolo, yolo-e2e, ctc, argmax | bit-exact `postprocess_batch_test.cpp` checkpoints; qa_matrix G/I1 |
+| Depth-2 tree (N sibling children) | qa_matrix I2 tree-parity (dominant-plate + top-label cross-checks) |
+| Per-channel norm/color | `crop_test`, 24/24 bit-exact |
+| Per-stream skip/decode overrides | qa_matrix C/D |
+| Drop-oldest backpressure | held 96% real-time pace under a stalled consumer, 788 evicted, verified |
+| Three-tier frame access (addr/fetch/cuda) | `pipeline_api_test` lifecycle (0 MB VRAM growth, 20-cycle matrix) |
+| `recommend()` capacity planner | qa_matrix H (4 sub-checks incl. a measured-cell self-check) |
+| fp16 dual-stage cascade | agreement-verified: dominant plate identical, minority misread 2.3%→4.8% |
+| The decoder path of Chapter 8 | `bench/smoke_digest.py` byte-identical across runs; `pipeline_api_test` 5-cycle lifecycle, VRAM flat; reconnect churn; HEVC; same-night ceiling campaign |
+| End-of-picture packet flag | demuxer-to-pop 19 ms at 1080p/24 (53 without it), digests unchanged |
+| `pip install .` from source | builds in the container without git; import and uninstall verified |
+
+## 9.2 The honest gaps
+
+A feature table only tells half the story if the missing half stays
+implicit.
+
+| Gap | State |
+|---|---|
+| No object tracker | skipped frames carry no boxes; `skip>1` has no interpolation — an open design decision |
+| No multi-GPU | one primary CUDA context; every `recommend()` constant is single-GPU (RTX 3060 Ti) only |
+| No runtime dynamic stream add/remove | fleet size is fixed at `Pipeline` construction |
+| `hold_frames` (tier 3) | an exit-time crash seen in earlier internal builds has not reproduced across 140 hunt attempts or the lifecycle checkpoint, but its write site was never localized — treated as suppressed, not proven fixed |
+| `recommend()` calibration | fitted on the atlas of Chapter 7: conservative above ~24 cameras at 720p / 16 at 1080p with every frame decoded, until the refit on the current decoder (§8.4) |
+| No INT8 path in the builder | fp16 only; a prebuilt INT8 engine can be loaded, but calibration is the user's job — the next lever at 720p, where the GPU sits at 93% with 48 cameras |
+| LPRNet charset | Chinese — mechanics-correct, wrong alphabet for EU plates; a content swap, not an architecture change |
+
+## 9.3 The roadmap, in order
+
+1. **Tracker + skip as one feature.** The largest capability gap: `skip=2`
+   already frees half the GPU, but produces no continuous identity across
+   skipped frames. The owner
+   decision still open is skipped-frame semantics — track IDs on
+   inferred frames only, or also emit flagged `predicted` boxes on
+   skipped ones.
+2. **NVENC annotated sink.** The one case Chapter 5's answer table
+   couldn't dodge: draw in VRAM, encode, republish — the `Sink` graph
+   node already built is the base it attaches to.
+3. **Per-track OCR voting.** The systematic fix for fp16's read jitter
+   (the 2.3%→4.8% minority misread from §9.1) — needs the tracker first,
+   since "per-track" presumes identity across frames.
+4. **Plugin ABI.** The compiled-family path (Chapter 6) is a
+   deliberate scope limit — no `dlopen`, no stable
+   C ABI — deferred until a family finds the seven-touch-point recompile
+   cost actually prohibitive in practice, not before.
+5. **Packaging.** `pip install .` via scikit-build-core works inside the
+   documented container; a prebuilt wheel, closing the build-inside-docker
+   requirement, does not exist (TensorRT redistribution limits apply
+   regardless of packaging).
+6. **The atlas refit.** The full 336-cell grid per resolution on the current
+   decoder, then `_capacity.py` refitted from it, so `recommend()` stops
+   under-promising above the atlas's every-frame ceilings. Then INT8 for the
+   detector, both here and on the DeepStream side, for an equal
+   comparison at 720p where compute is now the second wall.
+7. **Deeper trees.** The executor stops at depth-2 by name
+   (`Validate()`'s own error names the limit); a chain executor is
+   future work the API already expresses without yet running.
+
+## 9.4 The repository and its versions
+
+pycamtrt lives in its own repository on its own release line — `v0.4.0` is the first
+public release — separate from the research engine's history, which is not
+redistributed. The C++ core keeps its identity underneath (`pycamtrt_core`), and the two
+audiences the design serves — an engine contributor building kernels, a Python user
+declaring a graph — read the same repository through `src/` and `python/`
+respectively. `CHANGELOG.md` records what each version added; the version string is
+kept in lockstep in `pyproject.toml`, `CMakeLists.txt` and the package.
+
+## 9.5 Afterword: one method
+
+Part 1 proved a claim: a hand-built pipeline could hold its own frame budget, verified
+bit-exact against a CPU reference at every stage. Part 2 widened the unit of study from
+one frame to a fleet, and from a claim to a comparison. This part turns the same three
+through-lines — zero-copy, cost accounting, verification — outward: an endpoint that
+sends data back out without a copy tax, a family system proven general by being used to
+add new model shapes, a capacity atlas turned into a function anyone can call before
+they buy a GPU, and a decoder path whose ceiling is the silicon and not a wait.
+
+Chapter 8 is the method turned on the library's own results, with the instruments the
+series is built from: per-frame timers instead of utilization counters, a same-night grid
+instead of numbers from two dates, a digest instead of a glance. The habit of
+re-measuring what is already "known" is the expensive part, and the part worth keeping.
+
+> **Takeaway.** Every feature in this book ships with a gate, and every gap is stated as
+> plainly as every feature — a library earns trust the same way a single kernel does:
+> not by claiming completeness, but by being honest about exactly where it ends.

@@ -63,7 +63,7 @@ public:
         // packet stream. cuvid's parser requires Annex-B (start-code-
         // delimited NALs, SPS/PPS discoverable via a start code): fed AVCC
         // bytes unmodified, it silently parses nothing and NvDecoder never
-        // decodes a single frame (see CORDERO manual/FINDINGS.md's "MP4
+        // decodes a single frame (see the research project's FINDINGS ledger's "MP4
         // file input fails" entry - root-caused there). RTSP's RTP/H.264
         // depacketizer already reconstructs Annex-B (start codes + SPS/PPS
         // from the SDP or inline), so it never hits this and is left alone

@@ -9,7 +9,7 @@ set -u
 OUT=${1:?out dir}
 SRC=${2:?source (file path or rtsp url)}
 REPS=${3:-30}
-PY=/home/matiasu/anaconda3/envs/Python-dev/bin/python3
+PY="${PYTHON3:-python3}"
 export PYTHONPATH=/workspace/build:/workspace/python
 mkdir -p "$OUT"
 summary="$OUT/tally.txt"

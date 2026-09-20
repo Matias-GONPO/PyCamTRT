@@ -1,5 +1,9 @@
 # Build trees (created inside the tensorrt-dev container)
 build/
+# Isolated build tree the examples/*/Dockerfile convenience runners use
+# (kept separate from build/ so they never reconfigure a dev build that's
+# cached against a different Python - see any examples/*/Dockerfile).
+.docker-build/
 __pycache__/
 *.pyc
 
@@ -29,7 +33,17 @@ _b16_events.ndjson
 .~lock.*#
 # Benchmark raw results (archived per-campaign into Reports; the folder
 # itself ships empty)
-bench/results/
+# campaign results: keep the small CSV/latency summaries the README figures are built from,
+# ignore the per-cell run logs and GPU samples
+bench/results/**
+!bench/results/*/
+!bench/results/*.csv
+!bench/results/*/cells.csv
+!bench/results/*/latency_*.txt
+!bench/results/ds_2026-09-04/
+!bench/results/ds_2026-09-04/*.txt
+MANUAL.docx
+RELEASE_CHECKLIST.md
 bench/deepstream/run_plate/
 bench/deepstream/configs/app_*.txt
 bench/.diyenv/
@@ -48,3 +62,6 @@ models/yolov8n_dynamic.onnx
 models/yolo26n.onnx
 models/yolov8n_plates.onnx
 models/yolov8n_plates_dynamic.onnx
+
+# isolated venv for bench/diy_pynvc_trt.py (tensorrt wheel + pynvvideocodec + av)
+.diyenv/

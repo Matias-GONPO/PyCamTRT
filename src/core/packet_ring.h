@@ -1,6 +1,6 @@
 #pragma once
 
-// cordero::PacketRing - per-stream, host-only ring of ORIGINAL compressed
+// pycamtrt::PacketRing - per-stream, host-only ring of ORIGINAL compressed
 // video packets (Phase A1: endpoint capability, host-side tee sinks).
 //
 // WHY THIS EXISTS: RTSP packets already traverse host RAM (FFmpegDemuxer)
@@ -27,13 +27,21 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 }
 
-namespace cordero {
+namespace pycamtrt {
 
 // One retained packet. `data` is an owned copy (see PacketRing::Push's
 // WHY-comment on why the copy must happen immediately) - never a view into
 // the demuxer's own packet storage.
 struct RingPacket {
     std::vector<uint8_t> data;
+    // Monotonically increasing, assigned by PacketRing::Push - a stable
+    // per-packet cursor a live follower (StreamRelay) can resume from
+    // across reconnects without racing pts semantics at all (see
+    // PacketRing::SnapshotSinceSeq's WHY-comment: a looping publisher's
+    // pts WRAPS at each clip boundary, so a pts-keyed cursor either stalls
+    // or replays; seq never does either). Starts at 1 (0 is reserved as
+    // SnapshotSinceSeq's "nothing sent yet" sentinel).
+    uint64_t seq = 0;
     int64_t pts_us = -1;
     // Wall-clock arrival stamp (steady_clock us at Push) - the ring's
     // retention window trims on THIS, not pts (B3.5, campaign night 5):
@@ -122,6 +130,7 @@ public:
         std::lock_guard<std::mutex> lk(m_);
         RingPacket p;
         p.data.assign(data, data + size);
+        p.seq = next_seq_++;
         p.pts_us = pts_us;
         p.arrival_us = std::chrono::duration_cast<std::chrono::microseconds>(
                            std::chrono::steady_clock::now().time_since_epoch())
@@ -154,6 +163,32 @@ public:
         std::vector<RingPacket> out;
         for (const RingPacket& p : pkts_)
             if (p.pts_us > after_pts_us) out.push_back(p);
+        return out;
+    }
+
+    // Same snapshot contract as SnapshotSince, but keyed on the ring's own
+    // monotonic push sequence number (RingPacket::seq) instead of source
+    // pts. WHY THIS EXISTS (the loop-boundary bug): a looping publisher
+    // (ffmpeg -stream_loop -1) WRAPS pts back down at every clip boundary,
+    // so a pts-keyed "since" filter (SnapshotSince above) goes from
+    // returning new packets to returning NONE right after a wrap - every
+    // post-wrap packet's pts is smaller than the last one sent, so
+    // `p.pts_us > after_pts_us` is false for the whole next clip playthrough
+    // and a live follower (StreamRelay) starves until source pts climbs
+    // back past its old high-water mark. seq is assigned by Push() in
+    // strict push order and never resets or wraps in any realistic
+    // session, so it stays a correct cursor straight through pts
+    // discontinuities of any kind (wraps, reconnect-induced resets,
+    // NOPTS runs). last_seq == 0 means "nothing sent yet" -> returns the
+    // WHOLE ring, which is always IDR-anchored (see TrimLocked), matching
+    // SnapshotSince(-1)'s "everything" contract for a caller's first poll.
+    std::vector<RingPacket> SnapshotSinceSeq(uint64_t last_seq) const {
+        std::lock_guard<std::mutex> lk(m_);
+        if (last_seq == 0)
+            return std::vector<RingPacket>(pkts_.begin(), pkts_.end());
+        std::vector<RingPacket> out;
+        for (const RingPacket& p : pkts_)
+            if (p.seq > last_seq) out.push_back(p);
         return out;
     }
 
@@ -193,6 +228,9 @@ private:
     mutable std::mutex m_;
     std::deque<RingPacket> pkts_;
     AVCodecParameters* codecpar_ = nullptr;
+    // Starts at 1, not 0: 0 is SnapshotSinceSeq's "nothing sent yet"
+    // sentinel, so it must never be a real packet's seq.
+    uint64_t next_seq_ = 1;
 };
 
-}  // namespace cordero
+}  // namespace pycamtrt

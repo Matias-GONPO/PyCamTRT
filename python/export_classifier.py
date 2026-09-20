@@ -17,7 +17,7 @@ PER-CHANNEL (offset, scale) pair - see python/pycamtrt/__init__.py's Engine
 docstring. torchvision's ImageNet preprocessing is per-channel
 (mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225], RGB order, on a 0..1
 float image); this demo (and the M1b classifier-cascade demos generally -
-see examples/classify_detections.py, python/qa_matrix.py's CLASSIFIER_NORM,
+see examples/classify_detections/classify_detections.py, python/qa_matrix.py's CLASSIFIER_NORM,
 python/_qa_classifier_parity_subprocess.py) now uses the TRUE per-channel
 values, converted to pycamtrt's own (pixel+offset)*scale form on a 0..255
 pixel:
@@ -34,9 +34,9 @@ this demo); what M3a's qa_matrix.py section G2 measures instead is
 agreement between the pipeline's GPU classifier and a plain torch/cv2
 reference given the SAME (now per-channel) normalization on both sides.
 
-Usage (conda Python-dev env; no docker/TensorRT needed for this step - pure
+Usage (host Python env; no docker/TensorRT needed for this step - pure
 torch/torchvision/onnx):
-    /home/matiasu/anaconda3/envs/Python-dev/bin/python3 \\
+    python3 \\
         python/export_classifier.py
 
 Writes models/mobilenet_v3s_dynamic.onnx (input "images" [N,3,224,224] float32,
@@ -68,7 +68,7 @@ def main():
               f"argmax class {y1.argmax(dim=1).item()}")
         assert tuple(y1.shape) == (1, 1000)
 
-        # Batch-decoupling sanity (same spirit as the LPRNet export's check in the CORDERO repo,
+        # Batch-decoupling sanity (same spirit as the LPRNet export's check in the research repo,
         # cheaper here since mobilenet_v3_small has no batch-coupled ops to
         # begin with - this just confirms that fact rather than fixing
         # anything): slot 0's output must be identical regardless of its

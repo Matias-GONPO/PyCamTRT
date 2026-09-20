@@ -21,10 +21,10 @@ otherwise):
     models/yolo26n.onnx                yolo26n.pt        NMS-free e2e head
     models/rtdetr_l_dynamic.onnx       rtdetr-l.pt       family="rtdetr"
 
-Run (conda Python-dev env, no GPU needed - exports on CPU):
+Run (host Python env with ultralytics installed, no GPU needed - exports on CPU):
 
-    ~/anaconda3/envs/Python-dev/bin/python3 python/export_ultralytics.py
-    ~/anaconda3/envs/Python-dev/bin/python3 python/export_ultralytics.py rtdetr
+    python3 python/export_ultralytics.py
+    python3 python/export_ultralytics.py rtdetr
 
 With no argument every export above is produced; pass any of
 yolov8n / yolov8n_416 / yolov8n_1280 / yolo26n / rtdetr to export just

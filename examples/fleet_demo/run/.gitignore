@@ -1,0 +1,4 @@
+# Runtime PID files + logs from tools/publish_aic22.sh (mirrors
+# tools/stream_farm/run/ convention) - never committed.
+*.pid
+*.log

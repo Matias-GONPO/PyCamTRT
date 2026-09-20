@@ -1,0 +1,4 @@
+ src     n  decode_ms  queue_ms   gpu_ms  total_ms
+   0  1419     234.84      6.46     3.91    242.31
+--------------------------------------------------
+ ALL  1419     234.84      6.46     3.91    242.31   (median across all sources, warmup=60 frames dropped)

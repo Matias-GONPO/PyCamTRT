@@ -1,0 +1,5 @@
+res,system,N,offered_fps,achieved_fps,hold_pct,post_decode_ms,gpu_util_pct,note
+720p,deepstream_default,2,60,60.46,100.8,5.10,15.5,
+720p,deepstream_tuned,2,60,59.73,99.5,4.26,8.1,
+720p,pycamtrt,2,60,60.0,100.0,1.915,11.5,dropped=0
+720p,diy_detect_only,2,60,60.0,100.0,2.632,NA,steady_state

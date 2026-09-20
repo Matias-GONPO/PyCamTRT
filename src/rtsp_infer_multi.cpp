@@ -1,6 +1,6 @@
-// Step 5 CLI: thin consumer of cordero::Pipeline (see src/core/). All the
+// Step 5 CLI: thin consumer of pycamtrt::Pipeline (see src/core/). All the
 // multi-stream orchestration (producer threads, greedy batcher, GPU thread,
-// SAHI, OCR cascade, --verify) now lives in libcordero; this binary just
+// SAHI, OCR cascade, --verify) now lives in libpycamtrt_core; this binary just
 // builds a PipelineConfig step graph from flags, drives Start()/Poll(), and
 // reproduces the same per-frame lines and summary block the monolithic
 // binary used to print directly.
@@ -25,16 +25,16 @@
 
 #include "core/pipeline.h"
 
-using cordero::Detection;
-using cordero::Family;
-using cordero::FrameResult;
-using cordero::LayerDesc;
-using cordero::Pipeline;
-using cordero::PipelineConfig;
-using cordero::StepDesc;
-using cordero::StepKind;
-using cordero::StreamDesc;
-using cordero::StreamInfo;
+using pycamtrt::Detection;
+using pycamtrt::Family;
+using pycamtrt::FrameResult;
+using pycamtrt::LayerDesc;
+using pycamtrt::Pipeline;
+using pycamtrt::PipelineConfig;
+using pycamtrt::StepDesc;
+using pycamtrt::StepKind;
+using pycamtrt::StreamDesc;
+using pycamtrt::StreamInfo;
 
 namespace {
 

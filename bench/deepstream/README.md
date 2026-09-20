@@ -1,6 +1,6 @@
-# deepstream_bench — the DeepStream side of the CORDERO benchmark
+# deepstream_bench — the DeepStream side of the PyCamTRT benchmark
 
-DeepStream 8.0 reference pipeline mirroring CORDERO's cascade
+DeepStream 8.0 reference pipeline mirroring PyCamTRT's cascade
 (N RTSP -> batched yolov8n plate detector -> LPRNet OCR on crops), built
 from the SAME ONNX files, fed by the SAME mediamtx farm, config-driven
 (`deepstream-app`, zero app code). Purpose: the head-to-head measurement
@@ -10,7 +10,7 @@ proposed in report 5 §9.
 
 - `parsers/` — the only compiled code: two custom nvinfer parsers.
   - `yolov8_parser.cpp` — PGIE bbox parser for the [4+nc, anchors] head;
-    our own by decision (same decode math CORDERO verifies bit-exact).
+    our own by decision (same decode math PyCamTRT verifies bit-exact).
   - `lprnet_parser.cpp` — SGIE classifier parser; wraps the checkpointed
     `src/lprnet_ctc.h` greedy-CTC decoder (NVIDIA's lpr parser targets a
     different charset, so "reuse theirs" bought nothing — deviation from
@@ -26,7 +26,7 @@ proposed in report 5 §9.
 
 ```
 # 1. Build the parsers (inside the DS container, repo mounted):
-docker run --rm --gpus all -v ~/Desktop/PROYECTO/CORDERO:/workspace \
+docker run --rm --gpus all -v $(pwd):/workspace \
   nvcr.io/nvidia/deepstream:8.0-triton-multiarch \
   make -C /workspace/bench/deepstream/parsers
 
@@ -41,15 +41,15 @@ docker run --rm --gpus all -v ~/Desktop/PROYECTO/CORDERO:/workspace \
 ```
 
 First run per batch size builds TRT engines from the ONNX (minutes);
-they cache next to the ONNX files (gitignored like CORDERO's engines).
+they cache next to the ONNX files (gitignored like PyCamTRT's engines).
 
 ## Measurement parity (the methodology contract)
 
 - **Throughput**: `deepstream-app -t` prints per-stream fps; compare to
-  CORDERO's inferred/s per stream.
+  PyCamTRT's inferred/s per stream.
 - **Latency**: `--latency` sets NVDS_ENABLE_LATENCY_MEASUREMENT (+
   component-level). DS timestamps buffers at source and reports per-
-  component latency; mapping onto CORDERO's pre/queue/gpu splits is the
+  component latency; mapping onto PyCamTRT's pre/queue/gpu splits is the
   open methodological task — validate before quoting numbers.
 - **GPU util / VRAM / CPU**: `nvidia-smi dmon` + `pidstat` on the host,
   identical procedure for both systems.
@@ -67,7 +67,7 @@ latency-matched comparison (see Reports/report 5/FP16_AND_DEEPSTREAM_AUDIT):
 ```
 
 Tuned config differences (gen_app_config_tuned.sh + *_fp16.txt):
-- fp16 GIEs (network-mode=2) — matches CORDERO fp16; biggest lever.
+- fp16 GIEs (network-mode=2) — matches PyCamTRT fp16; biggest lever.
 - streammux batched-push-timeout 5 ms (was 33), source jitter 30 ms (100).
 First tuned run builds fp16 nvinfer engines (minutes; cached after). Use
 duration 0, not a short timeout — the fp16 max-batch-16 engine build
@@ -85,14 +85,14 @@ audited and confirmed correct. Smoke test re-verified after the parser fix.
 
 ## Known parity deviations (all deliberate, all recorded)
 
-1. **Letterbox pad value**: nvinfer pads black; CORDERO pads YOLO's 114
+1. **Letterbox pad value**: nvinfer pads black; PyCamTRT pads YOLO's 114
    gray (not configurable in DS). Marginal detector-input difference.
 2. **TF32**: no --noTF32 equivalent in nvinfer, so DS LPRNet runs with
    TF32 on. Report-5 data: CTC strings identical under TF32 drift —
    compare strings, not logits.
 3. **Batching policy**: DS closes batches on batched-push-timeout
-   (33 ms = one frame interval); CORDERO closes when the GPU thread is
+   (33 ms = one frame interval); PyCamTRT closes when the GPU thread is
    ready. Similar in spirit, not identical — affects latency at low N.
 4. **NMS**: nvinfer clusters post-parser (cluster-mode=2, IOU 0.45) on
-   CPU; CORDERO's NMS is a GPU kernel. Same algorithm, different
+   CPU; PyCamTRT's NMS is a GPU kernel. Same algorithm, different
    executor — part of what's being benchmarked, not a flaw.

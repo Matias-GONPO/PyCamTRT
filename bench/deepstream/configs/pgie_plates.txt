@@ -1,6 +1,6 @@
-# PGIE: yolov8n plate detector (nc=1), same ONNX as CORDERO's stage 1.
+# PGIE: yolov8n plate detector (nc=1), same ONNX as PyCamTRT's stage 1.
 # Parity targets: fp32, score 0.4, NMS IOU 0.45, centered letterbox.
-# Known deviation (recorded): nvinfer pads letterbox with black; CORDERO
+# Known deviation (recorded): nvinfer pads letterbox with black; PyCamTRT
 # pads YOLO-conventional 114 gray. Not configurable in DS — noted in README.
 [property]
 gpu-id=0

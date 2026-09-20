@@ -1,0 +1,112 @@
+=== compare 720p
+   N decode  skip | hold old hold new |  ms old  ms new | nvdec old nvdec new | bottleneck old -> new
+   1 all        1 |     99.0     97.3 |     2.1     2.0 |         2         2 | none(offered-bound) -> none(offered-bound)
+   8 all        1 |     97.4     97.7 |     2.2     2.1 |        18        16 | none(offered-bound) -> none(offered-bound)
+   8 all        2 |     97.5     97.5 |     2.1     2.0 |        18        16 | none(offered-bound) -> none(offered-bound)
+   8 all        3 |     97.4     97.5 |     2.0     2.0 |        18        16 | none(offered-bound) -> none(offered-bound)
+   8 all        6 |     97.4     97.7 |     2.0     1.9 |        18        15 | none(offered-bound) -> none(offered-bound)
+   8 all       15 |     97.4     97.1 |     1.9     2.0 |        18        15 | none(offered-bound) -> none(offered-bound)
+  16 all        1 |     97.4     97.1 |     3.3     2.8 |        36        31 | none(offered-bound) -> none(offered-bound)
+  16 all        2 |     97.4     96.9 |     2.6     2.1 |        36        31 | none(offered-bound) -> none(offered-bound)
+  16 all        3 |     97.4     97.1 |     2.3     2.1 |        36        32 | none(offered-bound) -> none(offered-bound)
+  16 all        6 |     96.8     97.0 |     2.1     2.0 |        36        31 | none(offered-bound) -> none(offered-bound)
+  16 all       15 |     97.5     97.1 |     2.1     1.9 |        37        32 | none(offered-bound) -> none(offered-bound)
+  32 all        1 |     96.8     97.2 |    60.8     4.4 |        75        64 | none(offered-bound) -> none(offered-bound)
+  32 all        2 |     97.4     97.1 |     7.5     2.9 |        74        63 | none(offered-bound) -> none(offered-bound)
+  32 all        3 |     97.4     97.0 |     7.2     2.5 |        73        63 | none(offered-bound) -> none(offered-bound)
+  32 all        6 |     97.4     97.1 |     4.4     2.1 |        73        63 | none(offered-bound) -> none(offered-bound)
+  32 all       15 |     97.4     97.1 |     3.7     1.9 |        73        63 | none(offered-bound) -> none(offered-bound)
+  50 all        1 |     62.7     95.9 |   116.3    11.8 |        73       100 | batch-queue -> none(offered-bound)
+  50 all        2 |     70.7     97.1 |   119.2     3.4 |        85       100 | NVDEC -> none(offered-bound)
+  50 all        3 |     78.4     97.2 |   101.9     2.7 |        96       100 | NVDEC -> none(offered-bound)
+  50 all        6 |     81.5     97.2 |    82.3     2.2 |        97       100 | NVDEC -> none(offered-bound)
+  50 all       15 |     83.7     97.1 |    59.4     2.1 |        99       100 | NVDEC -> none(offered-bound)
+  75 all        1 |     42.2     63.8 |   152.9    11.7 |        81       100 | NVDEC -> NVDEC
+  75 all        2 |     46.6     64.3 |   176.5     5.5 |        83       100 | NVDEC -> NVDEC
+  75 all        3 |     51.8     65.6 |   164.0     3.5 |        92       100 | NVDEC -> NVDEC
+  75 all        6 |     55.1     66.5 |   136.9     2.8 |        99       100 | NVDEC -> NVDEC
+  75 all       15 |     55.9     66.8 |    93.5     2.4 |        99       100 | NVDEC -> NVDEC
+ 100 key150     1 |     79.5     99.5 |     2.7     2.3 |         3         2 | mixed/ramp -> none(offered-bound)
+  32 key30      1 |     95.0     99.4 |     2.1     2.0 |         4         4 | none(offered-bound) -> none(offered-bound)
+  50 key30      1 |     96.2     99.6 |     2.0     2.0 |         7         6 | none(offered-bound) -> none(offered-bound)
+  75 key30      1 |     95.1     99.6 |     2.1     2.7 |         9         8 | none(offered-bound) -> none(offered-bound)
+ 100 key30      1 |     94.7     99.6 |     3.7     5.8 |        11        10 | mixed/ramp -> none(offered-bound)
+
+31 shared cells; now hold but did not: 7; held but no longer: 0
+=== compare 1080p
+   N decode  skip | hold old hold new |  ms old  ms new | nvdec old nvdec new | bottleneck old -> new
+   1 all        1 |     99.3     97.7 |     2.0     2.0 |         5         4 | none(offered-bound) -> none(offered-bound)
+   8 all        1 |     97.4     97.5 |     2.4     2.2 |        35        33 | none(offered-bound) -> none(offered-bound)
+   8 all        2 |     97.4     97.5 |     2.1     2.0 |        35        31 | none(offered-bound) -> none(offered-bound)
+   8 all        3 |     97.4     97.4 |     2.1     1.9 |        35        33 | none(offered-bound) -> none(offered-bound)
+   8 all        6 |     97.4     97.0 |     2.0     1.9 |        34        33 | none(offered-bound) -> none(offered-bound)
+   8 all       15 |     96.8     97.8 |     2.0     2.0 |        35        33 | none(offered-bound) -> none(offered-bound)
+  16 all        1 |     97.4     97.8 |     4.0     2.7 |        62        66 | none(offered-bound) -> none(offered-bound)
+  16 all        2 |     97.4     97.5 |     2.9     2.0 |        68        65 | none(offered-bound) -> none(offered-bound)
+  16 all        3 |     97.5     97.5 |     3.1     2.1 |        69        66 | none(offered-bound) -> none(offered-bound)
+  16 all        6 |     97.4     97.5 |     2.5     2.0 |        70        64 | none(offered-bound) -> none(offered-bound)
+  16 all       15 |     97.4     97.0 |     2.3     2.0 |        70        66 | none(offered-bound) -> none(offered-bound)
+  32 all        1 |     69.8     75.9 |   108.0     3.1 |        95       100 | NVDEC -> NVDEC
+  32 all        2 |     75.7     73.8 |    95.9     2.6 |       100       100 | NVDEC -> NVDEC
+  32 all        3 |     78.8     74.2 |    82.2     2.2 |       100       100 | NVDEC -> NVDEC
+  32 all        6 |     79.5     74.5 |    64.5     2.0 |       100       100 | NVDEC -> NVDEC
+  32 all       15 |     80.3     74.5 |    41.4     2.1 |       100       100 | NVDEC -> NVDEC
+  50 all        1 |     44.7     48.7 |   158.8     3.5 |       100       100 | NVDEC -> NVDEC
+  50 all        2 |     47.7     47.7 |   169.8     2.3 |        99       100 | NVDEC -> NVDEC
+  50 all        3 |     50.4     47.8 |   144.7     2.3 |       100       100 | NVDEC -> NVDEC
+  50 all        6 |     51.4     47.9 |   118.4     2.0 |       100       100 | NVDEC -> NVDEC
+  50 all       15 |     51.7     48.1 |    72.9     2.0 |       100       100 | NVDEC -> NVDEC
+ 100 key150     1 |     79.5     99.5 |     3.0     8.6 |         5         3 | mixed/ramp -> none(offered-bound)
+  32 key30      1 |     95.0     99.4 |     2.1     2.0 |         6         5 | none(offered-bound) -> none(offered-bound)
+  50 key30      1 |     94.6     99.4 |     2.1     2.1 |        12         8 | mixed/ramp -> none(offered-bound)
+  75 key30      1 |     95.1     99.6 |     3.5     3.2 |        14        11 | none(offered-bound) -> none(offered-bound)
+ 100 key30      1 |     94.6     99.4 |     4.6     5.9 |        17        16 | mixed/ramp -> none(offered-bound)
+
+26 shared cells; now hold but did not: 3; held but no longer: 0
+=== compare 1440p
+   N decode  skip | hold old hold new |  ms old  ms new | nvdec old nvdec new | bottleneck old -> new
+   1 all        1 |     99.3     98.3 |     2.0     2.0 |         8         7 | none(offered-bound) -> none(offered-bound)
+   8 all        1 |     97.5     97.4 |     2.9     2.0 |        60        55 | none(offered-bound) -> none(offered-bound)
+   8 all        2 |     96.8     97.0 |     2.5     1.9 |        58        55 | none(offered-bound) -> none(offered-bound)
+   8 all        3 |     97.4     97.4 |     2.6     1.9 |        59        57 | none(offered-bound) -> none(offered-bound)
+   8 all        6 |     97.4     97.5 |     2.2     1.9 |        59        56 | none(offered-bound) -> none(offered-bound)
+   8 all       15 |     97.4     97.5 |     2.1     2.0 |        59        58 | none(offered-bound) -> none(offered-bound)
+  16 all        1 |     80.3     85.6 |    74.1     1.9 |       100       100 | NVDEC -> NVDEC
+  16 all        2 |     81.5     86.1 |    60.6     1.9 |       100       100 | NVDEC -> NVDEC
+  16 all        3 |     82.4     86.5 |    54.4     1.9 |       100       100 | NVDEC -> NVDEC
+  16 all        6 |     82.4     86.6 |    38.1     2.0 |       100       100 | NVDEC -> NVDEC
+  16 all       15 |     82.4     86.6 |    29.8     2.0 |       100       100 | NVDEC -> NVDEC
+  32 all        1 |     39.8     42.6 |   172.2     2.0 |       100       100 | NVDEC -> NVDEC
+  32 all        2 |     40.7     42.9 |   165.2     1.9 |       100       100 | NVDEC -> NVDEC
+  32 all        3 |     41.3     43.6 |   140.9     2.0 |       100       100 | NVDEC -> NVDEC
+  32 all        6 |     41.4     43.7 |   107.1     2.0 |       100       100 | NVDEC -> NVDEC
+  32 all       15 |     41.3     43.4 |    75.3     2.0 |       100       100 | NVDEC -> NVDEC
+ 100 key150     1 |     71.5     58.0 |     3.0    10.0 |         4         3 | VRAM-OOM -> VRAM-OOM
+  32 key30      1 |     95.0     99.4 |     2.1     2.0 |        10        10 | none(offered-bound) -> none(offered-bound)
+  50 key30      1 |     95.0     99.4 |     2.1     2.5 |        12        13 | none(offered-bound) -> none(offered-bound)
+  75 key30      1 |     95.1     99.5 |     5.3     8.7 |        20        19 | none(offered-bound) -> none(offered-bound)
+
+20 shared cells; now hold but did not: 0; held but no longer: 0
+=== compare 4k
+   N decode  skip | hold old hold new |  ms old  ms new | nvdec old nvdec new | bottleneck old -> new
+   1 all        1 |     99.3    100.0 |     2.1     2.0 |        16        15 | none(offered-bound) -> none(offered-bound)
+   4 all        1 |     97.4     97.7 |     2.5     2.0 |        65        61 | none(offered-bound) -> none(offered-bound)
+   4 all        2 |     97.4     97.5 |     2.6     2.0 |        65        62 | none(offered-bound) -> none(offered-bound)
+   4 all        3 |     97.4     97.8 |     2.2     2.0 |        64        62 | none(offered-bound) -> none(offered-bound)
+   4 all        6 |     97.4     97.6 |     2.1     2.0 |        64        62 | none(offered-bound) -> none(offered-bound)
+   4 all       15 |     98.0     97.5 |     2.4     2.1 |        62        63 | none(offered-bound) -> none(offered-bound)
+   8 all        1 |     75.8     78.0 |    52.0     2.0 |       100       100 | NVDEC -> NVDEC
+   8 all        2 |     76.5     78.3 |    44.8     2.0 |       100       100 | NVDEC -> NVDEC
+   8 all        3 |     76.8     78.5 |    35.4     2.0 |       100       100 | NVDEC -> NVDEC
+   8 all        6 |     76.8     79.0 |    33.2     1.9 |       100       100 | NVDEC -> NVDEC
+   8 all       15 |     76.8     78.8 |    28.6     2.0 |       100       100 | NVDEC -> NVDEC
+  16 all        1 |     38.2     39.5 |   145.6     2.0 |       100       100 | NVDEC -> NVDEC
+  16 all        2 |     38.5     39.7 |   131.3     2.0 |       100       100 | NVDEC -> NVDEC
+  16 all        3 |     38.6     39.7 |   112.0     2.0 |       100       100 | NVDEC -> NVDEC
+  16 all        6 |     38.7     39.8 |    85.0     2.0 |       100       100 | NVDEC -> NVDEC
+  16 all       15 |     38.5     39.8 |    60.7     2.1 |       100       100 | NVDEC -> NVDEC
+  32 key150     1 |     79.7    100.0 |     2.1     2.6 |         5         5 | mixed/ramp -> none(offered-bound)
+  16 key30      1 |     95.0    100.0 |     2.0     2.0 |        11         6 | none(offered-bound) -> none(offered-bound)
+  32 key30      1 |     95.0     99.4 |     2.1     2.5 |        16        20 | none(offered-bound) -> none(offered-bound)
+
+19 shared cells; now hold but did not: 1; held but no longer: 0

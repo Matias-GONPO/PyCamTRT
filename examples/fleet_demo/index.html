@@ -1,0 +1,171 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>PyCamTRT fleet demo</title>
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 13px system-ui, sans-serif; }
+  #bar { display: flex; gap: 20px; align-items: center; padding: 8px 12px; background: #1c1c1c; }
+  #bar label { display: flex; gap: 6px; align-items: center; }
+  #bar output { min-width: 2ch; font-family: ui-monospace, monospace; }
+  #stats { padding: 4px 12px; font: 12px ui-monospace, monospace; white-space: pre-wrap; color: #9f9; }
+  #grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; padding: 4px; }
+  .tile { position: relative; aspect-ratio: 16 / 9; background: #000; overflow: hidden; }
+  .tile video, .tile canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .tile video { object-fit: contain; }
+  .tile span { position: absolute; left: 4px; top: 2px; font: 11px ui-monospace, monospace; color: #fff; text-shadow: 0 0 3px #000; }
+  button { padding: 4px 12px; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <b>PyCamTRT fleet demo</b>
+  <label>N streams <input id="n" type="range" min="1" max="65" value="16"><output id="nv">16</output></label>
+  <label>skip (infer every k-th frame) <input id="skip" type="range" min="1" max="10" value="1"><output id="skipv">1</output></label>
+  <label>decode <select id="decode"><option value="all">all frames</option><option value="key" id="keyopt">keyframes only</option></select></label>
+  <button id="apply">Apply (rebuild)</button>
+</div>
+<div id="stats">waiting for stats...</div>
+<div id="grid"></div>
+<script>
+const $ = id => document.getElementById(id);
+const SHOWN = 16;
+const TOL_US = 150000;        // pairing tolerance: 1.5 frames at 10 fps
+const rings = new Map();      // stream_id -> last 30 frame events
+
+async function main() {
+  const c = await (await fetch('/config')).json();
+  $('n').value = c.n; $('nv').value = c.n;
+  $('skip').value = c.skip; $('skipv').value = c.skip;
+  $('decode').value = c.decode;
+  // The keyframes-only decode rate is set by the clips' keyframe interval (tools/prep_aic22.py --gop),
+  // exactly as a real camera's own GOP setting would set it.
+  $('keyopt').textContent = `keyframes only (1 per ${(c.gop / c.fps).toFixed(1)} s, GOP ${c.gop})`;
+  if (!c.ready) {             // engine still building: retry by reloading (the only retry in this page)
+    $('stats').textContent = 'engine building... reloading in 3 s';
+    setTimeout(() => location.reload(), 3000);
+    return;
+  }
+  c.slugs.forEach((slug, i) => makeTile(i, slug));
+  const es = new EventSource('/events');
+  es.addEventListener('frame', e => {
+    const d = JSON.parse(e.data);
+    d.recv = Date.now() * 1000;
+    let r = rings.get(d.stream_id);
+    if (!r) rings.set(d.stream_id, r = []);
+    r.push(d);
+    if (r.length > 30) r.shift();
+  });
+  es.addEventListener('stats', e => { $('stats').textContent = fmt(JSON.parse(e.data)); });
+}
+
+function makeTile(i, slug) {
+  const div = document.createElement('div'); div.className = 'tile';
+  const video = document.createElement('video');
+  video.muted = true; video.autoplay = true; video.playsInline = true;
+  const canvas = document.createElement('canvas');
+  const label = document.createElement('span'); label.textContent = i + ' ' + slug;
+  div.append(video, canvas, label);
+  $('grid').append(div);
+  whep(video, 'aic/' + slug);
+  overlay(video, canvas, i);
+}
+
+// WebRTC via WHEP straight from mediamtx (:8889): gather the full offer, POST it once, apply the answer.
+async function whep(video, path) {
+  const pc = new RTCPeerConnection();
+  pc.addTransceiver('video', { direction: 'recvonly' });
+  pc.ontrack = ev => { video.srcObject = ev.streams[0]; video.play().catch(() => {}); };
+  await pc.setLocalDescription(await pc.createOffer());
+  await new Promise(res => {
+    if (pc.iceGatheringState === 'complete') return res();
+    const t = setTimeout(res, 2000);
+    pc.addEventListener('icegatheringstatechange', () => {
+      if (pc.iceGatheringState === 'complete') { clearTimeout(t); res(); }
+    });
+  });
+  const r = await fetch(`http://${location.hostname}:8889/${path}/whep`,
+    { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: pc.localDescription.sdp });
+  await pc.setRemoteDescription({ type: 'answer', sdp: await r.text() });
+  // Hold the video 100 ms in the jitter buffer so the frame's event has arrived when the frame shows.
+  for (const rx of pc.getReceivers()) {
+    if (!rx.track || rx.track.kind !== 'video') continue;
+    try {
+      if ('jitterBufferTarget' in rx) rx.jitterBufferTarget = 100;
+      else if ('playoutDelayHint' in rx) rx.playoutDelayHint = 0.1;
+    } catch (e) {}
+  }
+}
+
+function overlay(video, canvas, id) {
+  const ctx = canvas.getContext('2d');
+  const newest = () => { const r = rings.get(id); return r && r[r.length - 1]; };
+  // The event whose engine wall-clock stamp is nearest this frame's arrival at the browser
+  // (both sides stamp the same physical frame on the same host clock); else the newest event.
+  const pick = arrivalUs => {
+    const r = rings.get(id);
+    if (!r || !r.length) return undefined;
+    let best, bd = Infinity;
+    for (const e of r) { const d = Math.abs(e.wall_us - arrivalUs); if (d < bd) { bd = d; best = e; } }
+    return bd <= TOL_US ? best : r[r.length - 1];
+  };
+  const draw = evt => {
+    const dpr = window.devicePixelRatio || 1;
+    const cw = video.clientWidth || 1, ch = video.clientHeight || 1;
+    const pw = Math.round(cw * dpr), ph = Math.round(ch * dpr);
+    if (canvas.width !== pw || canvas.height !== ph) { canvas.width = pw; canvas.height = ph; }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.font = '12px ui-monospace, monospace';
+    if (!evt) { ctx.fillStyle = '#ff6'; ctx.fillText('no detections yet', 6, ch - 6); return; }
+    // object-fit: contain -> the picture occupies a centred rect scaled from the source size
+    const sw = video.videoWidth || 1920, sh = video.videoHeight || 1080;
+    const s = Math.min(cw / sw, ch / sh), ox = (cw - sw * s) / 2, oy = (ch - sh * s) / 2;
+    // Stale boxes (keyframes-only and/or a high skip: seconds between inferences) are
+    // dimmed and dated, so a box that has not moved reads as old, not as wrong.
+    const ageS = (Date.now() * 1000 - evt.wall_us) / 1e6;
+    ctx.globalAlpha = ageS > 1 ? 0.45 : 1;
+    ctx.lineWidth = 2; ctx.strokeStyle = '#3f3'; ctx.fillStyle = '#3f3';
+    for (const d of evt.dets) {
+      const x = ox + d.x * s, y = oy + d.y * s;
+      ctx.strokeRect(x, y, d.w * s, d.h * s);
+      ctx.fillText('#' + d.track_id, x + 2, y - 3);
+    }
+    ctx.globalAlpha = 1;
+    if (ageS > 1) { ctx.fillStyle = '#ff6'; ctx.fillText(`last inference ${ageS.toFixed(1)} s ago`, 6, ch - 6); }
+  };
+  if (video.requestVideoFrameCallback) {      // Chromium/Safari: one draw per displayed video frame
+    const onFrame = (now, md) => {
+      const arrivalUs = md.receiveTime != null ? (performance.timeOrigin + md.receiveTime) * 1000 : Infinity;
+      draw(pick(arrivalUs));
+      video.requestVideoFrameCallback(onFrame);
+    };
+    video.requestVideoFrameCallback(onFrame);
+  } else {                                     // Firefox: draw the newest event each animation frame
+    const loop = () => { draw(newest()); requestAnimationFrame(loop); };
+    requestAnimationFrame(loop);
+  }
+  new ResizeObserver(() => draw(newest())).observe(video);
+}
+
+$('n').oninput = e => { $('nv').value = e.target.value; };
+$('skip').oninput = e => { $('skipv').value = e.target.value; };
+$('apply').onclick = async () => {
+  const b = $('apply'); b.disabled = true; b.textContent = 'rebuilding...';
+  await fetch('/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ n: +$('n').value, skip: +$('skip').value, decode: $('decode').value }) });
+  location.reload();          // fresh WHEP + SSE connections against the rebuilt pipeline
+};
+
+const fmt = s =>
+  `N=${s.n}${s.n > SHOWN ? ' (showing first ' + SHOWN + ')' : ''}  skip=${s.skip}  decode=${s.decode}  gen ${s.gen}` +
+  `  |  decoded ${s.decoded_fps} fps of ${s.demand_fps} demanded  |  inferred ${s.results_fps}/s` +
+  `  |  GPU ${s.gpu_ms} ms/frame measured vs ${s.rec.predicted_gpu_ms_per_frame} predicted` +
+  `  |  dropped ${s.dropped}  failed streams ${s.failed}  |  GPU ${s.gpu_util}%  NVDEC ${s.nvdec_util}%\n` +
+  `recommend(): ${s.rec.holds_realtime ? 'holds real time' : 'OVER CAPACITY'}  |  GPU headroom ${s.rec.gpu_headroom_pct}%` +
+  `  NVDEC headroom ${s.rec.nvdec_headroom_pct}%  |  binding: ${s.rec.binding_resource}  |  ${s.rec.suggestion}`;
+
+main();
+</script>
+</body>
+</html>

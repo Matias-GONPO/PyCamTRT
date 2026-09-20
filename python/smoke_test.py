@@ -15,7 +15,7 @@ DEFAULT_ENGINE = "models/yolov8n_b1-16_fp32_sm86.engine"
 
 
 def log(msg: str) -> None:
-    print(f"[cordero] {msg}", file=sys.stderr)
+    print(f"[pycamtrt] {msg}", file=sys.stderr)
 
 
 def build_pipeline(urls, max_frames):

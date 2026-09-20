@@ -18,7 +18,7 @@ set -u
 export LC_ALL=C   # decimal points in awk output regardless of system locale
 cd "$(dirname "$0")"
 
-FFMPEG="${FFMPEG:-$HOME/anaconda3/envs/Python-dev/bin/ffmpeg}"
+FFMPEG="${FFMPEG:-ffmpeg}"
 CLIP="${CLIP:-media/webcam_60s.mp4}"
 PIDDIR="run"
 STAGGER=0.7   # seconds between stream starts (decorrelates keyframes)

@@ -346,6 +346,14 @@ def recommend(
         ValueError: unknown ``resolution``/``decode``, ``streams``/``skip``
             < 1, or an ``sahi`` dict missing ``"tile"`` / carrying an
             unknown key.
+    
+
+    Calibration note (v0.4.0): the cost model was fitted on the v2 capacity
+    atlas, measured before the decoder fix that moved the every-frame
+    ceilings to the NVDEC wall. Above the old ceilings (about 24 cameras at
+    720p, 16 at 1080p with every frame decoded) its verdict is conservative:
+    it may say ``over capacity`` where the measured build holds. Keyframe and
+    low-count predictions are unaffected. A v3 refit follows the full v3 atlas.
     """
     if resolution not in _RESOLUTION_PX:
         raise ValueError(

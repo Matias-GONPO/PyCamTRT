@@ -1,9 +1,9 @@
-"""pycamtrt - the declarative Python API for CORDERO's multi-stream
+"""pycamtrt - the declarative Python API for PyCamTRT's multi-stream
 TensorRT pipeline.
 
 This package is a thin, pure-Python compiler on top of the compiled
 extension module ``_pycamtrt`` (a near-1:1 pybind11 binding of
-``cordero::Pipeline`` - see src/python/bindings.cpp and src/core/{pipeline,
+``pycamtrt::Pipeline`` - see src/python/bindings.cpp and src/core/{pipeline,
 graph,result}.h). Users build a small object graph out of generic stages
 (``Process``, ``Engine``, ``Postprocess``) grouped into ``Layer``s, and this
 module compiles that graph into the ``StepDesc``/``LayerDesc``/
@@ -63,7 +63,7 @@ rejected with a named ``RuntimeError`` from the C++ executor's
 ``Validate()`` (pipeline.cpp): *"v1 executor supports a depth-2 tree: one
 detector layer feeding sibling recognition layers; chained cascades (a
 child of a child) are not yet executable"*. See
-``examples/read_and_classify.py`` for the full runnable 3-model version of
+``examples/read_and_classify/read_and_classify.py`` for the full runnable 3-model version of
 the tree above.
 
 Per-stream load-dial overrides (capacity planning is per-camera - see
@@ -174,14 +174,14 @@ See ``pycamtrt._capacity``'s module docstring for exactly how
 constants are measured on ONE GPU, RTX 3060 Ti / sm_86).
 
 Custom postprocessing - two tiers (M3b), split by TENSOR SIZE, not by
-preference (a settled CORDERO design rule):
+preference (a settled design rule of the research project):
 
   1. **Python on COMPACT results (this tier, legal and encouraged).** A
      ``Result``'s ``detections``/``texts``/``labels`` are already tiny
      (tens of survivors, ~KB) by the time your ``for r in pipe:`` loop
      sees them - filtering, zone logic, alerting, temporal smoothing, etc.
      on THAT data can never touch the per-frame GPU path; it runs entirely
-     on your consumer thread. Worked example: ``examples/zone_filter.py``
+     on your consumer thread. Worked example: ``examples/zone_filter/zone_filter.py``
      (per-stream polygon zones, occupancy counts, enter/leave prints - see
      its module docstring for the full contract, including the
      ``backpressure="drop_oldest"`` / ``dropped_results()`` escape hatch
@@ -220,7 +220,7 @@ except ImportError:
 
 from ._capacity import Recommendation, recommend
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "Streams",
@@ -245,7 +245,7 @@ StreamInfo = _c.StreamInfo
 PollStatus = _c.Pipeline.PollStatus
 
 # Family strings accepted by Postprocess(family=...), mapped to
-# cordero::Family (graph.h). Keep in sync with that enum. "argmax" (M1a) is
+# pycamtrt::Family (graph.h). Keep in sync with that enum. "argmax" (M1a) is
 # the classifier family - plain max-logit, no softmax (see
 # LaunchArgmaxBatched in postprocess.h) - usable as any SIBLING cascade
 # child's postprocess (M4b: layers 1..K, a depth-2 tree) alongside "ctc".
@@ -277,13 +277,13 @@ _FAMILIES = {
 _DECODE_MODES = ("all", "key")
 
 # Backpressure strings accepted by Pipeline(backpressure=...), mapped to
-# cordero::Backpressure (graph.h). Keep in sync with that enum.
+# pycamtrt::Backpressure (graph.h). Keep in sync with that enum.
 _BACKPRESSURE = {
     "block": _c.Backpressure.Block,
     "drop_oldest": _c.Backpressure.DropOldest,
 }
 
-# Sink kind strings accepted by Sink(kind=...), mapped to cordero::SinkKind
+# Sink kind strings accepted by Sink(kind=...), mapped to pycamtrt::SinkKind
 # (graph.h). Keep in sync with that enum.
 _SINK_KINDS = {
     "events": _c.SinkKind.Events,
@@ -433,7 +433,7 @@ class Select(_Step):
       batches.
     - Criteria must stay compilable (host-side comparisons in the crop
       path). Anything needing pixels or arbitrary Python belongs to the
-      Python-on-results tier (see ``examples/zone_filter.py``), not here.
+      Python-on-results tier (see ``examples/zone_filter/zone_filter.py``), not here.
 
     Args:
         input: the detector layer's ``Postprocess`` step.
@@ -921,7 +921,7 @@ class Result:
 
 class Pipeline:
     """Compiles a ``Streams`` + ``Layer`` object graph into a
-    ``cordero::PipelineConfig`` and drives the compiled ``_pycamtrt.Pipeline``.
+    ``pycamtrt::PipelineConfig`` and drives the compiled ``_pycamtrt.Pipeline``.
 
     Args:
         streams: the ``Streams`` object every step graph is rooted at. Any
@@ -1195,7 +1195,7 @@ class Pipeline:
 
     def start(self) -> None:
         """Spawns producer + GPU threads. Single-shot - calling twice
-        raises (mirrors ``cordero::Pipeline::Start``).
+        raises (mirrors ``pycamtrt::Pipeline::Start``).
         """
         self._pipe.start()
         self._started = True

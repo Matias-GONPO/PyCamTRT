@@ -1,0 +1,7 @@
+# per-cell logs and samples stay local; the atlas tables and the comparison are what the repo keeps
+dmon_*.txt
+vram_*.csv
+run_*.log
+farm_*.log
+series_*.log
+*.log

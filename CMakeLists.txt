@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.18)
 # BUILD TYPE DEFAULT (root-caused the hard way - see FINDINGS "the
 # unoptimized-release incident", 2026-09-02): CMake's empty default build
 # type compiles with NO optimization, and nothing in this project ever set
-# one - the CORDERO dev checkout only got -O3 because a years-old manual
+# one - the research project's dev checkout only got -O3 because a years-old manual
 # -DCMAKE_BUILD_TYPE=Release was riding in its build cache. An empty-type
 # build is functionally correct but up to ~45x slower on sparse-cadence
 # cells. Default to Release; -DCMAKE_BUILD_TYPE=Debug still overrides.
@@ -19,7 +19,7 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
     set(CMAKE_CUDA_ARCHITECTURES 86)
 endif()
 
-project(PyCamTRT VERSION 0.3.0)
+project(PyCamTRT VERSION 0.4.0)
 
 enable_language(CUDA)
 
@@ -52,7 +52,7 @@ message(STATUS "TENSORRT_INCLUDE_DIR: ${TENSORRT_INCLUDE_DIR}")
 message(STATUS "TENSORRT_LIB: ${TENSORRT_LIB}")
 message(STATUS "NVONNXPARSER_LIB: ${NVONNXPARSER_LIB}")
 
-# (The CORDERO research repo's Step-1 `simple_inference` relic is not part
+# (The research repo's Step-1 `simple_inference` relic is not part
 # of the library release - the earliest checkpoint here is rtsp_decode.)
 
 # --- Step 3: RTSP decode ---
@@ -149,24 +149,24 @@ if(EXISTS "${VIDEO_CODEC_SDK_DIR}/Interface")
     )
     target_link_directories(rtsp_infer PRIVATE ${FFMPEG_LIBRARY_DIRS})
 
-    # Part 1: libcordero - the multi-stream pipeline orchestration extracted
+    # Part 1: libpycamtrt_core - the multi-stream pipeline orchestration extracted
     # out of rtsp_infer_multi.cpp into a reusable library core (see
     # src/core/). Same gate as rtsp_infer_multi below since it needs the
     # same NVDEC/TensorRT/FFmpeg stack.
-    add_library(cordero STATIC
+    add_library(pycamtrt_core STATIC
         src/core/pipeline.cpp
         src/NvDecoder.cpp
         src/preprocess.cu
         src/postprocess.cu
     )
 
-    # PIC even though cordero is a static lib linked into executables
+    # PIC even though pycamtrt_core is a static lib linked into executables
     # (rtsp_infer_multi, pipeline_api_test): it's ALSO linked into the
     # _pycamtrt shared module (Part 3, below), which requires every
     # object it pulls in to be position-independent.
-    set_target_properties(cordero PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    set_target_properties(pycamtrt_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-    target_include_directories(cordero PUBLIC
+    target_include_directories(pycamtrt_core PUBLIC
         src
         ${VIDEO_CODEC_SDK_DIR}/Interface
         ${TENSORRT_INCLUDE_DIR}
@@ -174,7 +174,7 @@ if(EXISTS "${VIDEO_CODEC_SDK_DIR}/Interface")
         ${CUDA_INCLUDE_DIRS}
     )
 
-    target_link_libraries(cordero PUBLIC
+    target_link_libraries(pycamtrt_core PUBLIC
         ${TENSORRT_LIB} ${NVONNXPARSER_LIB}
         ${NVCUVID_LIB}
         ${CUDA_DRIVER_LIB}
@@ -182,27 +182,53 @@ if(EXISTS "${VIDEO_CODEC_SDK_DIR}/Interface")
         ${CUDA_LIBRARIES}
         pthread
     )
-    target_link_directories(cordero PUBLIC ${FFMPEG_LIBRARY_DIRS})
+    target_link_directories(pycamtrt_core PUBLIC ${FFMPEG_LIBRARY_DIRS})
 
-    # Step 5: multi-stream pipeline CLI - a thin consumer of libcordero
+    # Step 5: multi-stream pipeline CLI - a thin consumer of libpycamtrt_core
     # (build a PipelineConfig step graph from flags, Start()/Poll(), print).
     add_executable(rtsp_infer_multi src/rtsp_infer_multi.cpp)
 
     target_include_directories(rtsp_infer_multi PRIVATE src)
 
-    target_link_libraries(rtsp_infer_multi cordero)
+    target_link_libraries(rtsp_infer_multi pycamtrt_core)
 
-    # Part 2: lifecycle-robustness test for cordero::Pipeline (construct/
-    # Start/Poll/Stop/destruct edge cases) - same gate as cordero/
+    # Part 2: lifecycle-robustness test for pycamtrt::Pipeline (construct/
+    # Start/Poll/Stop/destruct edge cases) - same gate as pycamtrt_core/
     # rtsp_infer_multi above since it links the library directly.
     add_executable(pipeline_api_test src/pipeline_api_test.cpp)
 
     target_include_directories(pipeline_api_test PRIVATE src)
 
-    target_link_libraries(pipeline_api_test cordero)
+    target_link_libraries(pipeline_api_test pycamtrt_core)
 
-    # Part 3: pycamtrt - Python binding over libcordero (see
-    # src/python/bindings.cpp). Same NVDEC/TensorRT/FFmpeg gate as cordero
+    # examples/ - one C++ port per Python example, built directly on
+    # pycamtrt::Pipeline (same step-graph construction rtsp_infer_multi.cpp
+    # demonstrates, just one concrete pipeline shape per example rather
+    # than a flag-driven CLI). Same NVDEC/TensorRT/FFmpeg gate as pycamtrt_core
+    # above since every one of them links it. ON by default; turn off with
+    # -DPYCAMTRT_BUILD_EXAMPLES=OFF for a pycamtrt_core-only build.
+    option(PYCAMTRT_BUILD_EXAMPLES "Build the C++ examples" ON)
+
+    if(PYCAMTRT_BUILD_EXAMPLES)
+        set(PYCAMTRT_EXAMPLE_NAMES
+            read_plates
+            classify_detections
+            read_and_classify
+            detect_rtdetr
+            route_and_reid
+            zone_filter
+        )
+        foreach(example_name ${PYCAMTRT_EXAMPLE_NAMES})
+            add_executable(${example_name} examples/${example_name}/${example_name}.cpp)
+            target_include_directories(${example_name} PRIVATE src)
+            target_link_libraries(${example_name} pycamtrt_core)
+            set_target_properties(${example_name} PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/examples")
+        endforeach()
+    endif()
+
+    # Part 3: pycamtrt - Python binding over libpycamtrt_core (see
+    # src/python/bindings.cpp). Same NVDEC/TensorRT/FFmpeg gate as pycamtrt_core
     # above, ANDed with Python3 being found (a dev box without a Python
     # dev/interpreter still gets every other target). pybind11 is vendored
     # via FetchContent, pinned to v2.13.6 - it needs network access at
@@ -216,25 +242,49 @@ if(EXISTS "${VIDEO_CODEC_SDK_DIR}/Interface")
         # pybind11 defaults to its legacy FindPythonInterp/FindPythonLibs
         # discovery, which ignores Python3_EXECUTABLE and (in this repo's
         # docker image) picks up the container's own /usr/bin/python3
-        # instead of the conda Python-dev interpreter the module actually
+        # instead of the host interpreter the module actually
         # needs to import against. PYBIND11_FINDPYTHON routes it through
         # the modern FindPython3 module instead, which does respect the
         # hint cached above.
         set(PYBIND11_FINDPYTHON ON)
 
-        include(FetchContent)
-        FetchContent_Declare(
-            pybind11
-            GIT_REPOSITORY https://github.com/pybind/pybind11.git
-            GIT_TAG v2.13.6
-        )
-        FetchContent_MakeAvailable(pybind11)
+        # pybind11: prefer an installed copy (the `pybind11` pip package ships
+        # its CMake config; `pip install .` gets it from pyproject's
+        # build-system requires) and fall back to the pinned release tarball,
+        # which needs network but not git.
+        find_package(pybind11 2.12 CONFIG QUIET)
+        if(NOT pybind11_FOUND)
+            # Ask the interpreter: works under pip's build isolation too, where
+            # the pybind11 wheel lives on an overlay path CMake does not scan.
+            foreach(_py IN ITEMS "${Python_EXECUTABLE}" "${Python3_EXECUTABLE}" "python3")
+                if(NOT pybind11_FOUND AND NOT "${_py}" STREQUAL "")
+                    execute_process(COMMAND "${_py}" -c "import pybind11, sys; sys.stdout.write(pybind11.get_cmake_dir())"
+                                    OUTPUT_VARIABLE _pybind11_cmake_dir RESULT_VARIABLE _pybind11_rc ERROR_QUIET)
+                    message(STATUS "pybind11 lookup via ${_py}: rc=${_pybind11_rc} dir=${_pybind11_cmake_dir}")
+                    if(_pybind11_rc EQUAL 0 AND EXISTS "${_pybind11_cmake_dir}")
+                        set(pybind11_DIR "${_pybind11_cmake_dir}")
+                        find_package(pybind11 2.12 CONFIG QUIET)
+                    endif()
+                endif()
+            endforeach()
+        endif()
+        if(pybind11_FOUND)
+            message(STATUS "pybind11 ${pybind11_VERSION} from ${pybind11_DIR}")
+        else()
+            include(FetchContent)
+            FetchContent_Declare(
+                pybind11
+                URL https://github.com/pybind/pybind11/archive/refs/tags/v2.13.6.tar.gz
+                URL_HASH SHA256=e08cb87f4773da97fa7b5f035de8763abc656d87d5773e62f6da0587d1f0ec20
+            )
+            FetchContent_MakeAvailable(pybind11)
+        endif()
 
         pybind11_add_module(_pycamtrt src/python/bindings.cpp)
 
         target_include_directories(_pycamtrt PRIVATE src)
 
-        target_link_libraries(_pycamtrt PRIVATE cordero)
+        target_link_libraries(_pycamtrt PRIVATE pycamtrt_core)
 
         # pip packaging (scikit-build-core, see pyproject.toml): the compiled
         # module installs INSIDE the pycamtrt package. Harmless for the plain
@@ -314,7 +364,7 @@ target_link_libraries(engine_batch_test
 )
 
 # Cascade checkpoint: LPRNet engine vs PyTorch reference dump + greedy CTC
-# decode parity. TensorRT + CUDA only; reference bins exported alongside the LPRNet onnx (CORDERO repo).
+# decode parity. TensorRT + CUDA only; reference bins exported alongside the LPRNet onnx (research repo).
 add_executable(lprnet_test src/lprnet_test.cpp)
 
 target_include_directories(lprnet_test PRIVATE

@@ -18,7 +18,7 @@
 set -u
 export LC_ALL=C
 cd "$(dirname "$0")"
-FFMPEG="${FFMPEG:-$HOME/anaconda3/envs/Python-dev/bin/ffmpeg}"
+FFMPEG="${FFMPEG:-ffmpeg}"
 CLIP="${CLIP:-$(cd ../../tools/stream_farm && pwd)/media/atlas_plate_g30.mp4}"
 PIDDIR="run_plate"
 STAGGER=0.7

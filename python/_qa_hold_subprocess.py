@@ -6,7 +6,7 @@ WHY a subprocess (not just style): a reproducible native-level bug, isolated
 during this task's ctx-migration work, fires at PROCESS EXIT (not during
 actual use - every functional check below passes every single time before
 it) whenever BOTH of these are true in one process:
-  (a) more than one cordero::Pipeline has been constructed (regardless of
+  (a) more than one pycamtrt::Pipeline has been constructed (regardless of
       order or whether earlier ones were torn down or kept alive), AND
   (b) a hold_frames FrameResult's frame_cuda() view is consumed via
       torch.as_tensor(..., device="cuda").

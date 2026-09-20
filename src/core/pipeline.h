@@ -1,6 +1,6 @@
 #pragma once
 
-// cordero::Pipeline - the multi-stream batched-inference orchestrator,
+// pycamtrt::Pipeline - the multi-stream batched-inference orchestrator,
 // extracted from rtsp_infer_multi.cpp's main() (Step 5) so it can be driven
 // by more than one thin CLI/binding. Owns everything: CUDA context,
 // engine(s), the greedy batcher, the NV12 rings, all device scratch, the
@@ -16,7 +16,7 @@
 #include "core/graph.h"
 #include "core/result.h"
 
-namespace cordero {
+namespace pycamtrt {
 
 class Pipeline {
 public:
@@ -112,4 +112,4 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace cordero
+}  // namespace pycamtrt

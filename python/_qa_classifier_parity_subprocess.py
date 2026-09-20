@@ -11,7 +11,7 @@ parent's subprocess.run() captures the real result regardless of how (or
 whether) this process exits - exactly _qa_hold_subprocess.py's pattern.
 
 What this checks (the M1b parity gate): runs the SAME detect->classify
-cascade as examples/classify_detections.py on one stream with
+cascade as examples/classify_detections/classify_detections.py on one stream with
 hold_frames=True, and for each result independently recomputes the
 classifier's answer in plain torch/cv2/numpy from the SAME live frame
 (r.fetch_frame(), a D2H NV12 copy - tier 2, not tier 3 - see
@@ -60,7 +60,7 @@ CLASSIFIER_ENGINE = "models/mobilenet_v3s_b1-32_fp16_sm86.engine"
 # M3a: TRUE per-channel ImageNet normalization (upgrade of M1b's single
 # scalar-pair approximation, norm=(-114.0, 1/58.6)) - see
 # python/export_classifier.py's docstring for the mean/std -> offset/scale
-# derivation and examples/classify_detections.py. Both sides of this parity
+# derivation and examples/classify_detections/classify_detections.py. Both sides of this parity
 # check use this EXACT per-channel pair (that's the point: parity is about
 # the crop/resize/argmax mechanics agreeing, not about how good the norm
 # itself is) - RGB order, index 0 = R, matching color="rgb" below.

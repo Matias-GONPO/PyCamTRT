@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace cordero {
+namespace pycamtrt {
 
 struct Detection {
     float x, y, w, h, score;
@@ -164,4 +164,4 @@ struct StreamInfo {
     bool failed = false;
 };
 
-}  // namespace cordero
+}  // namespace pycamtrt

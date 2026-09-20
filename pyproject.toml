@@ -8,12 +8,12 @@
 # the separate, later phase - see the packaging notes in BUILD.md.
 
 [build-system]
-requires = ["scikit-build-core>=0.10"]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]  # pybind11 here so the isolated build needs neither git nor network for it
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "pycamtrt"
-version = "0.3.0"  # keep in lockstep with CMakeLists project() and __init__.__version__
+version = "0.4.0"  # keep in lockstep with CMakeLists project() and __init__.__version__
 description = "Zero-copy multi-camera RTSP -> TensorRT cascade inference (Python control plane, C++/CUDA data plane)"
 readme = "README.md"
 license = { text = "MIT" }

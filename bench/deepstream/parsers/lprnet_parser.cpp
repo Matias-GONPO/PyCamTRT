@@ -1,6 +1,6 @@
 // Custom nvinfer classifier parser for LPRNet: greedy CTC decode.
 //
-// Wraps src/lprnet_ctc.h — the exact decoder the CORDERO checkpoint
+// Wraps src/lprnet_ctc.h — the exact decoder the PyCamTRT checkpoint
 // (lprnet_test) verified against the PyTorch reference — instead of
 // adapting NVIDIA's lpr parser, whose dictionary/charset targets their
 // US/CN LPRNet variants, not the sirius-ai 68-class head we deploy.

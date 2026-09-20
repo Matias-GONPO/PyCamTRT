@@ -1,4 +1,4 @@
-// _pycamtrt: thin pybind11 binding over cordero::Pipeline (see
+// _pycamtrt: thin pybind11 binding over pycamtrt::Pipeline (see
 // src/core/pipeline.h, graph.h, result.h). This module exposes the C++
 // types as directly as reasonable - no policy, no defaults beyond what the
 // C++ structs already default to. The declarative, task-shaped API (Layer/
@@ -34,24 +34,24 @@
 
 namespace py = pybind11;
 
-using cordero::Backpressure;
-using cordero::ChildOutput;
-using cordero::Detection;
-using cordero::Family;
-using cordero::FrameResult;
-using cordero::LayerDesc;
-using cordero::Pipeline;
-using cordero::PipelineConfig;
-using cordero::SinkDesc;
-using cordero::SinkKind;
-using cordero::StepDesc;
-using cordero::StepKind;
-using cordero::StreamDesc;
-using cordero::StreamInfo;
+using pycamtrt::Backpressure;
+using pycamtrt::ChildOutput;
+using pycamtrt::Detection;
+using pycamtrt::Family;
+using pycamtrt::FrameResult;
+using pycamtrt::LayerDesc;
+using pycamtrt::Pipeline;
+using pycamtrt::PipelineConfig;
+using pycamtrt::SinkDesc;
+using pycamtrt::SinkKind;
+using pycamtrt::StepDesc;
+using pycamtrt::StepKind;
+using pycamtrt::StreamDesc;
+using pycamtrt::StreamInfo;
 
 PYBIND11_MODULE(_pycamtrt, m) {
     m.doc() =
-        "Thin pybind11 binding over cordero::Pipeline. Not meant to be used "
+        "Thin pybind11 binding over pycamtrt::Pipeline. Not meant to be used "
         "directly - see the pycamtrt package for the user-facing API.";
 
     py::enum_<StepKind>(m, "StepKind")
